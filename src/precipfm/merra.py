@@ -144,7 +144,6 @@ def download_dynamic(year: int, month: int, day: int, output_path: Path) -> None
                 data[var].data[:] = np.nan_to_num(data[var].data, nan=nan)
 
         if not "time" in data:
-            print("NO TIME :: ", data)
             continue
 
         if (data.time.data[0] - data.time.data[0].astype("datetime64[h]")) > 0:
@@ -152,14 +151,10 @@ def download_dynamic(year: int, month: int, day: int, output_path: Path) -> None
                 data[var].data[1:] = 0.5 * (data[var].data[1:] + data[var].data[:-1])
             new_time = data.time.data - 0.5 * (data.time.data[1] -  data.time.data[0])
             data = data.assign_coords(time=new_time)
-        for var in data:
-            print(var, np.any(np.isnan(data[var].data)))
+
         times = list(data.time.data)
         inds = [times.index(t_s) for t_s in time_steps]
-        print("INDS :: ", inds)
         data_t = data[{"time": inds}]
-        for var in data_t:
-            print(var, np.any(np.isnan(data_t[var].data)))
 
         all_data.append(data_t)
 
