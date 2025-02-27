@@ -5,6 +5,7 @@ precipfm.datasets
 Provides dataset classes for loading input data for the PrithviWxC foundation model.
 """
 from functools import cached_property, cache, partial
+import logging
 import os
 import re
 from pathlib import Path
@@ -23,6 +24,9 @@ from precipfm.merra import (
     SURFACE_VARS,
     VERTICAL_VARS
 )
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 @cache
@@ -661,36 +665,41 @@ class PrecipForecastDataset(MERRAInputData):
         """
         Load and return a single data point from the dataset.
         """
-        input_files = [self.input_files[ind] for ind in self.input_indices[ind]]
-        input_times = [self.input_times[ind] for ind in self.input_indices[ind]]
+        try:
+            input_files = [self.input_files[ind] for ind in self.input_indices[ind]]
+            input_times = [self.input_times[ind] for ind in self.input_indices[ind]]
+            dynamic_in = [self.load_dynamic_data(path) for path in input_files]
 
-        print(input_times)
-        print([self.output_times[out_ind] for out_ind in self.output_indices[ind]])
+            static_times = [
+                self.output_times[out_ind] - np.timedelta64(self.time_step, "h") for out_ind in self.output_indices[ind]
+            ]
+            static_in = [self.load_static_data(static_time) for static_time in static_times]
 
-        dynamic_in = [self.load_dynamic_data(path) for path in input_files]
+            input_time = self.input_time
+            lead_time = self.time_step
 
-        static_times = [
-            self.output_times[out_ind] - np.timedelta64(self.time_step, "h") for out_ind in self.output_indices[ind]
-        ]
-        static_in = [self.load_static_data(static_time) for static_time in static_times]
+            # Remove one row along lat dimension.
+            pad = partial(nn.functional.pad, pad=((0, 0, 0, -1)))
 
-        input_time = self.input_time
-        lead_time = self.time_step
+            x = {
+                "x": pad(torch.stack(dynamic_in, 0)),
+                "static": pad(torch.stack(static_in, 0)),
+                "input_time": torch.tensor(input_time).to(dtype=torch.float32),
+                "lead_time": torch.tensor(lead_time).to(dtype=torch.float32)
+            }
 
-        # Remove one row along lat dimension.
-        pad = partial(nn.functional.pad, pad=((0, 0, 0, -1)))
+            output_files = [self.output_files[ind] for ind in self.output_indices[ind]]
+            precip = []
+            for path in output_files:
+                with xr.open_dataset(self.root_dir / path) as data:
+                    precip.append(torch.tensor(data.surface_precip.data))
 
-        x = {
-            "x": pad(torch.stack(dynamic_in, 0)),
-            "static": pad(torch.stack(static_in, 0)),
-            "input_time": torch.tensor(input_time).to(dtype=torch.float32),
-            "lead_time": torch.tensor(lead_time).to(dtype=torch.float32)
-        }
-
-        output_files = [self.output_files[ind] for ind in self.output_indices[ind]]
-        precip = []
-        for path in output_files:
-            with xr.open_dataset(self.root_dir / path) as data:
-                precip.append(torch.tensor(data.surface_precip.data))
-
-        return x, precip
+            return x, precip
+        except Exception:
+            LOGGER.exception(
+                "Encountered an error when load training sample %s. Falling back to another ",
+                " randomly-chosen sample.",
+                ind
+            )
+            new_ind = np.random.randint(0, len(self))
+            return new_ind
