@@ -165,7 +165,7 @@ def download_dynamic(year: int, month: int, day: int, output_path: Path) -> None
         lon="longitude"
     )
 
-    output_path = Path(output_path) / f"{year:04}/{month:02}/{day:02}"
+    output_path = Path(output_path) / f"dynamic/{year:04}/{month:02}/{day:02}"
     output_path.mkdir(exist_ok=True, parents=True)
 
     encoding = {name: {"zlib": True} for name in data}

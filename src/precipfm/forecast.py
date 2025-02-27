@@ -71,6 +71,8 @@ class Forecaster:
 
         mr_tmp = model.mask_ratio_inputs
 
+        print(mr_tmp)
+
         with torch.no_grad():
             for step in range(n_steps):
 
@@ -96,7 +98,7 @@ class Forecaster:
         lons, lats = self.input_loader.get_lonlats()
 
         dataset = xr.Dataset({
-            "time": (("time", times)),
+            "time": (("time", times.astype("datetime64[ns]"))),
             "latitude": (("latitude",), lats[:-1]),
             "longitude": (("longitude",), lons),
         })

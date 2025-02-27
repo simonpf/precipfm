@@ -11,11 +11,12 @@ import numpy as np
 from scipy.stats import binned_statistic_2d
 from pansat import FileRecord, Geometry, TimeRange
 from pansat.products.satellite.gpm import l3b_hhr_3imerg_ms_mrg_07b
+from pansat.time import to_datetime
 import xarray as xr
 
 
 LON_BINS = np.linspace(-180, 180, 577)
-LAT_BINS = np.linspace(-90, 90, 181)
+LAT_BINS = np.linspace(-90, 90, 361)
 
 
 def download(year: int, month: int, day: int, output_path: Path) -> None:
@@ -67,6 +68,8 @@ def download(year: int, month: int, day: int, output_path: Path) -> None:
     encoding = {"surface_precip": {"dtype": np.float32, "zlib": True}}
     for time_ind in range(data.time.size):
         data_t = data[{'time': time_ind}]
-        time = data_t["time"].astype("datetime64[s]").item()
-        fname = time.strftime("imerg_%Y%m%d%H%M.nc")
+        time = to_datetime(data_t["time"].data)
+        fname = time.strftime(f"imerg/{time.year:04}/{time.month:02}/imerg_%Y%m%d%H%M.nc")
+        output_file = output_path / fname
+        output_file.parent.mkdir(parents=True, exist_ok=True)
         data_t.to_netcdf(output_path / fname, encoding=encoding)

@@ -35,6 +35,10 @@ logging.basicConfig(
 logger = logging.getLogger("precipfm")
 console = Console()
 
+
+LOGGER = logging.getLogger(__name__)
+
+
 @click.group()
 def precipfm():
     """The command line interface for the precipfm package."""

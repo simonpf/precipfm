@@ -117,7 +117,7 @@ class MERRAInputData(Dataset):
         if lead_times is None:
             lead_times = [3]
         self.root_dir = Path(root_dir)
-        self.times, self.input_files = self.find_files(self.root_dir)
+        self.times, self.input_files = self.find_files(self.root_dir / "dynamic")
 
         self._pos_sig = None
         self.input_times = input_times
@@ -325,7 +325,7 @@ class MERRAInputData(Dataset):
         rel_time = time - time.astype("datetime64[Y]").astype(time.dtype)
         rel_time = np.datetime64("1980-01-01T00:00:00") + rel_time
         static_data = load_static_data(self.root_dir).interp(
-            time=rel_time,
+            time=rel_time.astype("datetime64[ns]"),
             method="nearest",
             kwargs={"fill_value": "extrapolate"}
         )
@@ -515,9 +515,7 @@ class GEOSInputData(MERRAInputData):
         """
         Load and return a single data point from the dataset.
         """
-
         input_files = [self.input_files[ind] for ind in self.input_indices[ind]]
-        print("IF :: ", input_files)
         input_times = [self.times[ind] for ind in self.input_indices[ind]]
         output_files = [self.input_files[ind] for ind in self.output_indices[ind]]
         output_times = [self.times[ind] for ind in self.output_indices[ind]]
@@ -544,3 +542,155 @@ class GEOSInputData(MERRAInputData):
         y = pad(torch.tensor(dynamic_out[0]))
 
         return x, y
+
+
+class PrecipForecastDataset(MERRAInputData):
+    """
+    A PyTorch Dataset for loading 3-hourly MERRA2 data and corresponding precip fields
+    organized into year/month/day folders.
+    """
+    def __init__(
+            self,
+            root_dir: Union[Path, str],
+            time_step: int = 3,
+            n_steps: int = 8
+    ):
+        """
+        Args:
+            root_dir (str): Root directory containing year/month/day folders.
+            time_step: The forecast time step.
+            n_steps: The number of forecast steps to perform.
+        """
+        self.input_time = -time_step
+        self.time_step = time_step
+        self.n_steps = n_steps
+
+        self.root_dir = Path(root_dir)
+        self.input_times, self.input_files = self.find_merra_files(self.root_dir)
+        self.output_times, self.output_files = self.find_precip_files(self.root_dir)
+
+        self._pos_sig = None
+        self.time_step = time_step
+        self.input_indices, self.output_indices = self.calculate_valid_samples()
+
+
+    def find_merra_files(self, root_dir: Path) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        Gather all available MERRA2 files paths and extract available times.
+
+        Args:
+            root_dir: Path object pointing to the root of the data directory.
+
+        Return:
+            A tuple containing arrays of available inputs times and corresponding file
+            paths.
+        """
+        times = []
+        files = []
+        pattern = re.compile(r"merra_(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})\.nc")
+
+        for path in sorted(list(root_dir.glob("**/merra2_*.nc"))):
+            try:
+                date = datetime.strptime(path.name, "merra2_%Y%m%d%H%M%S.nc")
+                date64 = to_datetime64(date)
+
+                files.append(str(path.relative_to(root_dir)))
+                times.append(date64)
+            except ValueError:
+                continue
+
+        times = np.array(times)
+        files = np.array(files)
+        return times, files
+
+
+    def find_precip_files(self, root_dir) -> np.ndarray:
+        """
+        Find precip files for training.
+        """
+        times = []
+        files = []
+        pattern = re.compile(r"imerg_(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})\.nc")
+
+        for path in sorted(list(root_dir.glob("imerg/**/imerg_*.nc"))):
+            try:
+                date = datetime.strptime(path.name, "imerg_%Y%m%d%H%M%S.nc")
+                date64 = to_datetime64(date)
+                files.append(str(path.relative_to(root_dir)))
+                times.append(date64)
+            except ValueError:
+                continue
+
+        times = np.array(times)
+        files = np.array(files)
+        return times, files
+
+
+    def calculate_valid_samples(self) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        A tuple of index arrays containing the indices of input- and output files for all training data
+        samples satifying the requested input and lead time combination.
+
+        Return: A tuple '(input_indices, output_indices)' with `input_indices` of shape
+            '(n_samples, n_input_times)' containing the indices of all the input files for each data
+            samples. Similarly, 'output_indices' is a numpy.ndarray of shape '(n_samples, n_lead_times)'
+            containing the corresponding file indices to load for the output data.
+        """
+        input_indices = []
+        output_indices = []
+        for ind in range(self.input_times.size):
+            sample_time = self.input_times[ind]
+            input_times = [sample_time + np.timedelta64(t_i * self.time_step, "h") for t_i in [-1, 0]]
+            output_times = [
+                sample_time + np.timedelta64(t_i * self.time_step, "h") for t_i in np.arange(1, self.n_steps + 1)
+            ]
+            valid = (
+                all([t_i in self.input_times for t_i in input_times]) and
+                all([t_l in self.output_times for t_l in output_times])
+            )
+            output_ind = np.searchsorted(self.output_times, sample_time)
+            if valid:
+                input_indices.append([ind - self.time_step // 3, ind])
+                output_indices.append([output_ind + (step + 1) * (self.time_step // 3) for step in np.arange(0, self.n_steps)])
+        return np.array(input_indices), np.array(output_indices)
+
+    def __len__(self):
+        return len(self.input_indices)
+
+    def __getitem__(self, ind: int) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        Load and return a single data point from the dataset.
+        """
+        input_files = [self.input_files[ind] for ind in self.input_indices[ind]]
+        input_times = [self.input_times[ind] for ind in self.input_indices[ind]]
+
+        print(input_times)
+        print([self.output_times[out_ind] for out_ind in self.output_indices[ind]])
+
+        dynamic_in = [self.load_dynamic_data(path) for path in input_files]
+
+        static_times = [
+            self.output_times[out_ind] - np.timedelta64(self.time_step, "h") for out_ind in self.output_indices[ind]
+        ]
+        static_in = [self.load_static_data(static_time) for static_time in static_times]
+
+        input_time = self.input_time
+        lead_time = self.time_step
+
+        # Remove one row along lat dimension.
+        pad = partial(nn.functional.pad, pad=((0, 0, 0, -1)))
+
+        x = {
+            "x": pad(torch.stack(dynamic_in, 0)),
+            "static": pad(torch.stack(static_in, 0)),
+            "input_time": torch.tensor(input_time).to(dtype=torch.float32),
+            "lead_time": torch.tensor(lead_time).to(dtype=torch.float32)
+        }
+
+        output_files = [self.output_files[ind] for ind in self.output_indices[ind]]
+        precip = []
+        for path in output_files:
+            with xr.open_dataset(self.root_dir / path) as data:
+                precip.append(torch.tensor(data.surface_precip.data))
+
+        return x, precip
