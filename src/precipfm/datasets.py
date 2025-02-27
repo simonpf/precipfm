@@ -697,7 +697,7 @@ class PrecipForecastDataset(MERRAInputData):
             return x, precip
         except Exception:
             LOGGER.exception(
-                "Encountered an error when load training sample %s. Falling back to another ",
+                "Encountered an error when load training sample %s. Falling back to another "
                 " randomly-chosen sample.",
                 ind
             )
