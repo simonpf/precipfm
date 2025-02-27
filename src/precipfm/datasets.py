@@ -702,4 +702,4 @@ class PrecipForecastDataset(MERRAInputData):
                 ind
             )
             new_ind = np.random.randint(0, len(self))
-            return new_ind
+            return self[new_ind]
