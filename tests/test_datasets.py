@@ -1,6 +1,7 @@
 """
 Tests for the precipfm.datasets module for loading the PrithviWxC input data.
 """
+from datetime import datetime
 import os
 from pathlib import Path
 
@@ -12,9 +13,22 @@ from PrithviWxC.dataloaders.merra2 import (
     preproc
 )
 import torch
+import xarray as xr
 
 
-from precipfm.datasets import MERRAInputData
+from precipfm.datasets import (
+    MERRAInputData,
+    PrecipForecastDataset,
+    DirectPrecipForecastDataset
+)
+
+from precipfm.merra import (
+    SURFACE_VARS,
+    VERTICAL_VARS,
+    STATIC_SURFACE_VARS,
+    VERTICAL_VARS,
+    LEVELS
+)
 
 
 MERRA_DATA_PATH = os.environ.get("MERRA_DATA", None)
@@ -236,3 +250,144 @@ def test_get_forecast_input_dynamic():
     dynamic_data = dataset.get_forecast_input_dynamic(np.datetime64("2020-01-01T06:00:00"))
 
     assert torch.all(x["x"] == dynamic_data)
+
+
+def create_file_dynamic(path: Path, year: int, month: int, day: int, hour: int):
+    """
+    Create a dummy MERRA2 training data file containing the day of the year in the surface variables
+    and the hour of the day in the vertical variables.
+    """
+    data = xr.Dataset()
+    for var in SURFACE_VARS:
+        data[var] = (("latitude", "longitude"), day * np.ones((360, 576)))
+    for var in VERTICAL_VARS:
+        data[var] = (("levels", "latitude", "longitude"), hour * np.ones((len(LEVELS), 360, 576)))
+    output_path = path / "dynamic" / f"{year}" / f"{month:02}" / f"{day:02}" / f"merra2_{year}{month:02}{day:02}{hour:02}0000.nc"
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    data.to_netcdf(output_path)
+
+
+def create_file_static(path: Path):
+    """
+    Create a  MERRA2 static data file containing the day of the year in the surface variables
+    and the hour of the day in the vertical variables.
+    """
+    data = xr.Dataset()
+    for var in STATIC_SURFACE_VARS:
+        data[var] = (("time", "latitude", "longitude"), np.arange(12)[:, None, None] * np.ones((12, 360, 576)))
+    data["time"] = (
+        ("time",),
+        np.arange(
+            np.datetime64("1980-01-01T00:00:00", "M"),
+            np.datetime64("1981-01-01T00:00:00", "M"),
+            np.timedelta64(1, "M")
+        )
+    )
+    output_path = path / "static" / "merra2_static.nc"
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    data.to_netcdf(output_path)
+
+
+def create_file_climatology(path: Path, year: int, month: int, day: int, hour: int):
+    """
+    Create PrithviWxC climatology files.
+    """
+    start_of_year = datetime(year=year, month=1, day=1)
+    day_of_year = datetime(year=year, month=month, day=day)
+    doy = (day_of_year - start_of_year).days + 1
+
+    data_surf = xr.Dataset()
+    for var in SURFACE_VARS:
+        data_surf[var] = (("latitude", "longitude"), day * np.ones((360, 576)))
+    output_path = path / "climatology" / f"climate_surface_doy{doy:03}_hour{hour:02}.nc"
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    data_surf.to_netcdf(output_path)
+
+    data_vert = xr.Dataset()
+    for var in VERTICAL_VARS:
+        data_vert[var] = (("levels", "latitude", "longitude"), hour * np.ones((len(LEVELS), 360, 576)))
+    output_path = path / "climatology" / f"climate_vertical_doy{doy:03}_hour{hour:02}.nc"
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    data_vert.to_netcdf(output_path)
+
+def create_file_imerg(path: Path, year: int, month: int, day: int, hour: int):
+    """
+    Create a dummy IMERG training data file containing the hour of the day as precipitation values so that
+    the loaded data can be used to verify that the correct data is loaded.
+    """
+    data = xr.Dataset()
+    data["surface_precip"] = (("latitude", "longitude"), hour * np.ones((360, 576)))
+    output_path = path / "imerg" / f"{year}" / f"{month:02}" / f"{day:02}" / f"imerg_{year}{month:02}{day:02}{hour:02}0000.nc"
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    data.to_netcdf(output_path)
+
+
+@pytest.fixture(scope="session")
+def training_data(tmp_path_factory):
+    """
+    Create dummy training data for precipitation forecasts.
+    """
+    base_dir = tmp_path_factory.mktemp("training_data")
+
+    create_file_static(base_dir)
+    for hour in range(0, 24, 3):
+        create_file_dynamic(base_dir, 2020, 1, 1, hour)
+        create_file_climatology(base_dir, 2020, 1, 1, hour)
+        create_file_imerg(base_dir, 2020, 1, 1, hour)
+
+    return base_dir
+
+def test_precip_forecast_dataset(training_data):
+    """
+    Test that precipitation forecast dataset loads the right time step data.
+    """
+    static_files = sorted(list(training_data.glob("static/2020/01/01/*.nc")))
+
+    ds = PrecipForecastDataset(
+        training_data,
+        n_steps=2
+    )
+    assert len(ds) == 5
+
+    x, y = ds[0]
+
+    assert torch.isclose(x["static"][:, 6:], torch.tensor(0.0)).all()
+    assert torch.isclose(x["x"][:, :20], torch.tensor(1.0)).all()
+    assert torch.isclose(x["x"][0, 20:], torch.tensor(0.0)).all()
+    assert torch.isclose(x["x"][1, 20:], torch.tensor(3.0)).all()
+    assert torch.isclose(y[0], torch.tensor(6.0)).all()
+    assert torch.isclose(y[1], torch.tensor(9.0)).all()
+
+def test_direct_precip_forecast_dataset(training_data):
+    """
+    Test that direct precipitation forecast dataset loads the right time step data.
+    """
+    static_files = sorted(list(training_data.glob("static/2020/01/01/*.nc")))
+
+    ds = DirectPrecipForecastDataset(
+        training_data,
+        max_steps=3
+    )
+    assert len(ds) == 6
+
+    x, y = ds[0]
+    assert torch.isclose(x["static"][6:], torch.tensor(0.0)).all()
+    assert torch.isclose(x["x"][:, :20], torch.tensor(1.0)).all()
+    assert torch.isclose(x["x"][0, 20:], torch.tensor(0.0)).all()
+    assert torch.isclose(x["x"][1, 20:], torch.tensor(3.0)).all()
+    assert (torch.tensor(6.0) <= y[0]).all()
+    assert (y[0] <= torch.tensor(12.0)).all()
+    assert torch.isclose(y[0], x["lead_time"] + 3).all()
+    assert (3 <= x["lead_time"]).all()
+    assert (x["lead_time"] <= 9).all()
+
+    x, y = ds[1]
+    assert torch.isclose(x["static"][6:], torch.tensor(0.0)).all()
+    assert torch.isclose(x["x"][:, :20], torch.tensor(1.0)).all()
+    assert torch.isclose(x["x"][0, 20:], torch.tensor(3.0)).all()
+    assert torch.isclose(x["x"][1, 20:], torch.tensor(6.0)).all()
+    assert (torch.tensor(9.0) < y[0]).all()
+    assert (y[0] <= torch.tensor(15.0)).all()
+    assert torch.isclose(y[0], x["lead_time"] + 6).all()
+    assert (3 <= x["lead_time"]).all()
+    assert (x["lead_time"] <= 9).all()

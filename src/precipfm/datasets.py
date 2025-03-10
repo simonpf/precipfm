@@ -593,7 +593,7 @@ class PrecipForecastDataset(MERRAInputData):
         files = []
         pattern = re.compile(r"merra_(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})\.nc")
 
-        for path in sorted(list(root_dir.glob("**/merra2_*.nc"))):
+        for path in sorted(list(root_dir.glob("dynamic/**/merra2_*.nc"))):
             try:
                 date = datetime.strptime(path.name, "merra2_%Y%m%d%H%M%S.nc")
                 date64 = to_datetime64(date)
@@ -692,10 +692,128 @@ class PrecipForecastDataset(MERRAInputData):
             precip = []
             for path in output_files:
                 with xr.open_dataset(self.root_dir / path) as data:
-                    precip.append(torch.tensor(data.surface_precip.data))
+                    precip.append(torch.tensor(data.surface_precip.data.astype(np.float32)))
 
             return x, precip
-        except Exception:
+        except Exception as exc:
+            raise exc
+            LOGGER.exception(
+                "Encountered an error when load training sample %s. Falling back to another "
+                " randomly-chosen sample.",
+                ind
+            )
+            new_ind = np.random.randint(0, len(self))
+            return self[new_ind]
+
+
+class DirectPrecipForecastDataset(PrecipForecastDataset):
+    """
+    A PyTorch Dataset for loading precipitation forecast training data for direct forecasts without
+    unrolling.
+    """
+    def __init__(
+            self,
+            root_dir: Union[Path, str],
+            time_step: int = 3,
+            max_steps: int = 24
+    ):
+        """
+        Args:
+            root_dir (str): Root directory containing year/month/day folders.
+            time_step: The forecast time step.
+            max_steps: The maximum number of timesteps to forecast precipitation.
+        """
+        self.input_time = -time_step
+        self.time_step = time_step
+        self.max_steps = max_steps
+
+        self.root_dir = Path(root_dir)
+        self.input_times, self.input_files = self.find_merra_files(self.root_dir)
+        self.output_times, self.output_files = self.find_precip_files(self.root_dir)
+
+        self._pos_sig = None
+        self.time_step = time_step
+        self.input_indices, self.output_indices = self.calculate_valid_samples()
+        self.rng = np.random.default_rng(seed=42)
+
+
+    def worker_init_fn(self, w_id: int) -> None:
+        """
+        Seeds the dataset loader's random number generator.
+        """
+        seed = int.from_bytes(os.urandom(4), "big") + w_id
+        self.rng = np.random.default_rng(seed)
+
+
+    def calculate_valid_samples(self) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        A tuple of index arrays containing the indices of input- and output files for all training data
+        samples satifying the requested input and lead time combination.
+
+        Return: A tuple '(input_indices, output_indices)' with `input_indices` of shape
+            '(n_samples, n_input_times)' containing the indices of all the input files for each data
+            samples. Similarly, 'output_indices' is a numpy.ndarray of shape '(n_samples, n_lead_times)'
+            containing the corresponding file indices to load for the output data.
+        """
+        input_indices = []
+        output_indices = []
+        for ind in range(self.input_times.size):
+            sample_time = self.input_times[ind]
+            input_times = [sample_time + np.timedelta64(t_i * self.time_step, "h") for t_i in [-1, 0]]
+            output_times = [
+                sample_time + np.timedelta64(t_i * self.time_step, "h") for t_i in np.arange(1, self.max_steps + 1)
+            ]
+            output_times = [t_o for t_o in output_times if t_o in self.output_times]
+            output_ind = np.searchsorted(self.output_times, sample_time)
+            valid = all([t_i in self.input_times for t_i in input_times])
+            if valid and len(output_times) > 0:
+                input_indices.append([ind - self.time_step // 3, ind])
+                time_diffs = [(t_o - sample_time).astype("timedelta64[h]") for t_o in output_times]
+                inds = [output_ind + (t_d // 3).astype(int) for t_d in time_diffs]
+                output_indices.append(inds + [-1] * (self.max_steps - len(inds)))
+        return np.array(input_indices), np.array(output_indices)
+
+    def __len__(self):
+        return len(self.input_indices)
+
+    def __getitem__(self, ind: int) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        Load and return a single data point from the dataset.
+        """
+        try:
+            input_files = [self.input_files[ind] for ind in self.input_indices[ind]]
+            input_times = [self.input_times[ind] for ind in self.input_indices[ind]]
+            dynamic_in = [self.load_dynamic_data(path) for path in input_files]
+
+            static_time = self.input_times[-1]
+            static_in = self.load_static_data(static_time)
+
+            input_time = self.input_time
+            lead_time = self.time_step
+
+            # Remove one row along lat dimension.
+            pad = partial(nn.functional.pad, pad=((0, 0, 0, -1)))
+
+            x = {
+                "x": pad(torch.stack(dynamic_in, 0)),
+                "static": pad(static_in),
+                "input_time": torch.tensor(input_time).to(dtype=torch.float32),
+                "lead_time": torch.tensor(lead_time).to(dtype=torch.float32)
+            }
+
+            inds = self.output_indices[ind]
+            inds = inds[0 <= inds]
+            output_ind = self.rng.choice(inds)
+            output_file = self.output_files[output_ind]
+            output_time = self.output_times[output_ind]
+            lead_time = (output_time - max(input_times)).astype("timedelta64[h]").astype(np.float32)
+            x["lead_time"] = torch.tensor(lead_time).to(dtype=torch.float32)
+            with xr.open_dataset(self.root_dir / output_file) as data:
+                precip = torch.tensor(data.surface_precip.data.astype(np.float32))
+            return x, precip
+
+        except Exception as exc:
+            raise exc
             LOGGER.exception(
                 "Encountered an error when load training sample %s. Falling back to another "
                 " randomly-chosen sample.",
