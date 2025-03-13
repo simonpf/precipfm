@@ -14,9 +14,7 @@ from pansat.products.satellite.gpm import l3b_hhr_3imerg_ms_mrg_07b
 from pansat.time import to_datetime
 import xarray as xr
 
-
-LON_BINS = np.linspace(-180, 180, 577)
-LAT_BINS = np.linspace(-90, 90, 361)
+from precipfm.definitions import LAT_BINS, LON_BINS
 
 
 def download(year: int, month: int, day: int, output_path: Path) -> None:
