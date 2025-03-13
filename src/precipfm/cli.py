@@ -24,6 +24,7 @@ from precipfm.merra import (
 
 from precipfm import geos
 from precipfm import imerg
+from precipfm.obs import gpm
 
 
 # Configure logger
@@ -249,3 +250,6 @@ def extract_imerg_data(
                     logger.exception(f"Error processing day {d}: {e}")
                 finally:
                     progress.update(task_id, advance=1)
+
+
+precipfm.command(name="extract_gpm_data")(gpm.process_sensor_data)
