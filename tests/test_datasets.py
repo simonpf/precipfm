@@ -352,6 +352,21 @@ def test_precip_forecast_dataset(training_data):
     x, y = ds[0]
 
     assert torch.isclose(x["static"][:, 6:], torch.tensor(0.0)).all()
+
+    cos_doy = x["static"][:, 2]
+    assert torch.isclose(cos_doy, torch.cos(2 * np.pi * torch.tensor(1) / 366), atol=1e-3).all()
+    sin_doy = x["static"][:, 3]
+    assert torch.isclose(sin_doy, torch.sin(2 * np.pi * torch.tensor(1) / 366), atol=1e-3).all()
+    cos_hod = x["static"][0, 4]
+    assert torch.isclose(cos_hod, torch.cos(2 * np.pi * torch.tensor(3) / 24), atol=1e-3).all()
+    cos_hod = x["static"][1, 4]
+    assert torch.isclose(cos_hod, torch.cos(2 * np.pi * torch.tensor(6) / 24), atol=1e-3).all()
+    sin_hod = x["static"][0, 5]
+    assert torch.isclose(sin_hod, torch.sin(2 * np.pi * torch.tensor(3) / 24), atol=1e-3).all()
+    sin_hod = x["static"][1, 5]
+    assert torch.isclose(sin_hod, torch.sin(2 * np.pi * torch.tensor(6) / 24), atol=1e-3).all()
+
+    assert torch.isclose(x["static"][:, 6:], torch.tensor(0.0)).all()
     assert torch.isclose(x["x"][:, :20], torch.tensor(1.0)).all()
     assert torch.isclose(x["x"][0, 20:], torch.tensor(0.0)).all()
     assert torch.isclose(x["x"][1, 20:], torch.tensor(3.0)).all()
@@ -372,6 +387,15 @@ def test_direct_precip_forecast_dataset(training_data):
 
     x, y = ds[0]
     assert torch.isclose(x["static"][6:], torch.tensor(0.0)).all()
+    cos_doy = x["static"][2]
+    assert torch.isclose(cos_doy, torch.cos(2 * np.pi * torch.tensor(1) / 366), atol=1e-3).all()
+    sin_doy = x["static"][3]
+    assert torch.isclose(sin_doy, torch.sin(2 * np.pi * torch.tensor(1) / 366), atol=1e-3).all()
+    cos_hod = x["static"][4]
+    assert torch.isclose(cos_hod, torch.cos(2 * np.pi * torch.tensor(3) / 24), atol=1e-3).all()
+    sin_hod = x["static"][5]
+    assert torch.isclose(sin_hod, torch.sin(2 * np.pi * torch.tensor(3) / 24), atol=1e-3).all()
+
     assert torch.isclose(x["x"][:, :20], torch.tensor(1.0)).all()
     assert torch.isclose(x["x"][0, 20:], torch.tensor(0.0)).all()
     assert torch.isclose(x["x"][1, 20:], torch.tensor(3.0)).all()

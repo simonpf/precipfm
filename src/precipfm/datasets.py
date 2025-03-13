@@ -4,20 +4,22 @@ precipfm.datasets
 
 Provides dataset classes for loading input data for the PrithviWxC foundation model.
 """
+from datetime import datetime
 from functools import cached_property, cache, partial
 import logging
+from math import ceil, trunc
 import os
 import re
 from pathlib import Path
+from typing import Dict, List, Optional, Tuple, Union
 
-from pansat.time import to_datetime64
+import numpy as np
+from pansat.time import to_datetime64, to_datetime
 import torch
 from torch import nn
 from torch.utils.data import Dataset
 import xarray as xr
 import numpy as np
-from datetime import datetime
-from typing import Tuple, Union, Optional, List
 
 from precipfm.merra import (
     STATIC_SURFACE_VARS,
@@ -785,7 +787,7 @@ class DirectPrecipForecastDataset(PrecipForecastDataset):
             input_times = [self.input_times[ind] for ind in self.input_indices[ind]]
             dynamic_in = [self.load_dynamic_data(path) for path in input_files]
 
-            static_time = self.input_times[-1]
+            static_time = input_times[-1]
             static_in = self.load_static_data(static_time)
 
             input_time = self.input_time
@@ -808,7 +810,7 @@ class DirectPrecipForecastDataset(PrecipForecastDataset):
             output_time = self.output_times[output_ind]
             lead_time = (output_time - max(input_times)).astype("timedelta64[h]").astype(np.float32)
             x["lead_time"] = torch.tensor(lead_time).to(dtype=torch.float32)
-            with xr.open_dataset(self.root_dir / output_file) as data:
+            with xr.load_dataset(self.root_dir / output_file) as data:
                 precip = torch.tensor(data.surface_precip.data.astype(np.float32))
             return x, precip
 
@@ -821,3 +823,116 @@ class DirectPrecipForecastDataset(PrecipForecastDataset):
             )
             new_ind = np.random.randint(0, len(self))
             return self[new_ind]
+
+    def get_forecast_input(self, init_time: np.datetime64) -> Dict[str, torch.Tensor]:
+        """
+        Get forecast input data to perform a continuous forecast.
+        """
+        input_times = [init_time + np.timedelta64(t_i * self.time_step, "h") for t_i in [-1, 0]]
+        for input_time in input_times:
+            if input_time not in self.input_times:
+                raise ValueError(
+                    "Required input data for t=%s not available.",
+                    input_time
+                )
+
+        dynamic_in = []
+        for input_time in input_times:
+            ind = np.searchsorted(self.input_times, input_times[-1])
+            dynamic_in.append(self.load_dynamic_data(self.input_files[ind]))
+
+        static_time = self.input_times[-1]
+        static_in = self.load_static_data(static_time)
+
+        pad = partial(nn.functional.pad, pad=((0, 0, 0, -1)))
+        dynamic_in = pad(torch.stack(dynamic_in, 0))[None].repeat(self.max_steps, 1, 1, 1, 1)
+        static_in = pad(static_in)[None].repeat(self.max_steps, 1, 1, 1)
+        input_time = self.input_time * torch.ones(self.max_steps)
+        lead_time = self.time_step * torch.arange(1, self.max_steps + 1).to(dtype=torch.float32)
+
+        x = {
+            "x": dynamic_in,
+            "static": static_in,
+            "lead_time": lead_time,
+            "input_time": input_time,
+        }
+        return x
+
+        
+
+
+class ObservationLoader(Dataset):
+    """
+    PyTorch dataset for loading global satellite observations.
+    """
+
+    def __init__(
+            self,
+            observation_path: Path,
+            observation_layers: int = 32,
+            n_tiles: Tuple[int, int] = (8, 18),
+            tile_size: Tuple[int, int] = (30, 32)
+    ):
+        """
+        Args:
+            observation_path: Path containing the observations.
+        """
+        self.observation_path = Path(observation_path)
+        self.observation_layers = observation_layers
+        self.n_tiles = n_tiles
+        self.tile_size = tile_size
+        self.rng = np.random.default_rng(seed=42)
+
+    def worker_init_fn(self, w_id: int) -> None:
+        """
+        Seeds the dataset loader's random number generator.
+        """
+        #tracemalloc.start()
+        seed = int.from_bytes(os.urandom(4), "big") + w_id
+        self.rng = np.random.default_rng(seed)
+
+
+    def load_observations(self, time: np.datetime64):
+        """
+        Load observations for a given time.
+        """
+        date = to_datetime(time)
+        path = self.observation_path / date.strftime("%Y/%m/%d/%H/")
+
+        obs = []
+        meta = []
+
+        index = xr.load_dataset(path / "index.nc")
+        mask = index.availability_mask
+
+        for row_ind in range(self.n_tiles[0]):
+            row_start = trunc(row_ind * self.tile_size[0] / 4)
+            row_end = row_start + ceil(self.tile_size[0] / 4)
+            for col_ind in range(self.n_tiles[1]):
+
+                tile_obs = []
+                tile_meta = []
+
+                col_start = trunc(row_ind * self.tile_size[1] / 8)
+                col_end = col_start + ceil(self.tile_size[1] / 8)
+                tile_mask = mask[{"y": slice(row_start, row_end), "x": slice(col_start, col_end)}]
+                platforms = index.platforms.data[np.where(tile_mask.any(("x", "y")).data)]
+
+                available_files = []
+                for platform in platforms:
+                    available_files += list(index[platform].data)
+                available_files = self.rng.permutation(available_files)
+
+                row_slice = slice(row_start * 4, row_end * 4)
+                col_slice = slice(col_start * 8, col_end * 8)
+
+                for layer_ind in range(self.observation_layers):
+                    if layer_ind < len(available_files):
+                        with xr.open_dataset(path / (available_files[layer_ind] + ".nc")) as data:
+                            channel_obs = data.observations[{"y": row_slice, "x": col_slice}].compute().data
+                        tile_obs.append(torch.tensor(channel_obs))
+                    else:
+                        tile_obs.append(torch.nan * torch.zeros(self.tile_size))
+
+                obs.append(tile_obs)
+        return obs
