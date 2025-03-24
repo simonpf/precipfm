@@ -41,7 +41,7 @@ def extract_observations(
         base_path: Path,
         cpcir_file: FileRecord,
         target_grid: AreaDefinition,
-        n_tiles: Tuple[int, int] = (6, 9),
+        n_tiles: Tuple[int, int] = (12, 18),
         time_step = np.timedelta64(3, "h"),
 ) -> xr.Dataset:
     """
@@ -63,7 +63,20 @@ def extract_observations(
     frequency = speed_of_light / (wavelength / 1e6) / 1e9
     cpcir_obs.attrs["wavelength"] = wavelength
     cpcir_obs.attrs["frequency"] = frequency
+    cpcir_obs.attrs["offset"] = 0.0
     cpcir_obs.attrs["polarization"] = "None"
+
+    cpcir_obs = cpcir_obs.coarsen({"longitude": 32, "latitude": 30})
+    cpcir_obs = cpcir_obs.construct(
+        {"longitude": ("tiles_zonal", "lon_tile"),
+         "latitude": ("tiles_meridional", "lat_tile")}
+    )
+    cpcir_obs = cpcir_obs.stack(tiles=("tiles_meridional", "tiles_zonal"))
+    cpcir_obs = cpcir_obs.transpose("tiles", "time", "lat_tile", "lon_tile")
+
+    obs = cpcir_obs.observations.data
+    obs[obs < 101] = np.nan
+    obs[obs > 350] = np.nan
 
     for time_ind in range(cpcir_obs.time.size):
 
@@ -71,34 +84,35 @@ def extract_observations(
         time = cpcir_obs_t.time.data
         ref_time = round_time(time, time_step)
         rel_time = time - ref_time
-        cpcir_obs_t.attrs["relative_time"] = rel_time.astype("timedelta64[s]").astype("int64")
+        cpcir_obs_t.attrs["observation_relative_time"] = rel_time.astype("timedelta64[s]").astype("int64")
 
-        height, width = cpcir_obs_t.observations.data.shape
-        tile_dims = (height // n_tiles[0], width // n_tiles[1])
-
+        valid = np.isfinite(cpcir_obs_t.observations.data)
+        if valid.sum() == 0:
+            continue
         track_stats(base_path, "cpcir", cpcir_obs_t.observations.data)
-        cpcir_obs_t.attrs["name"] = "cpcir"
+        cpcir_obs_t.attrs["obs_name"] = "cpcir"
 
-        for row_ind in range(n_tiles[0]):
-            for col_ind in range(n_tiles[1]):
-                row_start = row_ind * tile_dims[0]
-                row_end = row_start + tile_dims[0]
-                col_start = col_ind * tile_dims[1]
-                col_end = col_start + tile_dims[1]
+        valid_tiles = np.isfinite(cpcir_obs_t.observations).mean(("lon_tile", "lat_tile")) > 0.5
+        cpcir_obs_t = cpcir_obs_t[{"tiles": valid_tiles}].reset_index("tiles")
 
-                tile = cpcir_obs_t[{"latitude": slice(row_start, row_end), "longitude": slice(col_start, col_end)}]
-                valid_fraction = np.isfinite(tile.observations.data).mean()
-                if valid_fraction < 0.3:
-                    continue
+        rel_minutes = rel_time.astype("timedelta64[m]").astype("int64")
+        obs_name = f"cpcir_{rel_minutes:03}"
+        output_file = obs_name + ".nc"
+        output_path = base_path / get_output_path(ref_time) / output_file
 
-                rel_minutes = rel_time.astype("timedelta64[m]").astype("int64")
-                obs_name = f"{row_ind:02}_{col_ind:02}_cpcir_{rel_minutes:03}"
-                output_file = obs_name + ".nc"
-                output_path = base_path / get_output_path(ref_time) / output_file
-                if not output_path.parent.exists():
-                    output_path.parent.mkdir(parents=True)
-                tile.to_netcdf(output_path)
-                update_tile_list(output_path.parent, n_tiles, row_ind, col_ind, output_path.name)
+        encoding = {
+            "observations": {
+                "zlib": True,
+                "dtype": "uint8",
+                "add_offset": 100.0,
+                "_FillValue": 255
+            }
+        }
+
+        if not output_path.parent.exists():
+            output_path.parent.mkdir(parents=True)
+
+        cpcir_obs_t.to_netcdf(output_path, encoding=encoding)
 
 
 def extract_observations_day(

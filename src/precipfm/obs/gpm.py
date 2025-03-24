@@ -42,7 +42,8 @@ from .utils import (
     calculate_angles,
     get_output_path,
     round_time,
-    update_tile_list
+    update_tile_list,
+    track_stats
 )
 
 
@@ -91,7 +92,7 @@ def extract_observations(
         platform_name: str,
         sensor_name: str,
         radius_of_influence: float,
-        n_tiles: Tuple[int, int] = (6, 9),
+        n_tiles: Tuple[int, int] = (12, 18),
         time_step = np.timedelta64(3, "h"),
 ) -> xr.Dataset:
     """
@@ -218,36 +219,42 @@ def extract_observations(
                     "observation_azimuth_angle": {"dtype": "uint16", "scale_factor": 0.01, "_FillValue": uint16_max, "zlib": True},
                 }
 
-
                 n_rows, n_cols = output.observations.data.shape
                 tile_dims = (n_rows // n_tiles[0], n_cols // n_tiles[1])
 
-                for row_ind in range(n_tiles[0]):
-                    for col_ind in range(n_tiles[1]):
-                        row_start = row_ind * tile_dims[0]
-                        row_end = row_start + tile_dims[0]
-                        col_start = col_ind * tile_dims[1]
-                        col_end = col_start + tile_dims[1]
+                obs_name = f"{platform_name}_{sensor_name}_{freq:.02f}_{offset:.02}_{pol.lower()}"
 
-                        tile = output[{"y": slice(row_start, row_end), "x": slice(col_start, col_end)}]
-                        valid_fraction = np.isfinite(tile.observations.data).mean()
-                        if valid_fraction < 0.3:
-                            continue
+                valid = np.isfinite(output.observations.data)
+                if valid.sum() == 0:
+                    continue
+                track_stats(base_path, obs_name, output.observations.data)
 
-                        obs_name = f"{row_ind:02}_{col_ind:02}_{platform_name}_{sensor_name}_{freq:.02f}_{offset:.02}_{pol.lower()}"
-                        output_file = obs_name + ".nc"
-                        output_path = base_path / get_output_path(time) / output_file
-                        output_path.parent.mkdir(parents=True, exist_ok=True)
+                output.attrs["obs_name"] = obs_name
 
-                        if output_path.exists():
-                            data = xr.load_dataset(output_path)
-                            mask = np.isfinite(tile.observations.data)
-                            for var in output.variables:
-                                data[var].data[mask] = tile[var].data[mask]
-                            data.to_netcdf(output_path, encoding=encoding)
-                        else:
-                            tile.to_netcdf(output_path, encoding=encoding)
-                            update_tile_list(output_path.parent, n_tiles, row_ind, col_ind, output_path.name)
+                output = output.coarsen({"x": 32, "y": 30})
+                output = output.construct({
+                    "x": ("tiles_zonal", "lon_tile"),
+                    "y": ("tiles_meridional", "lat_tile")
+                })
+                output = output.stack(tiles=("tiles_meridional", "tiles_zonal"))
+                output = output.transpose("tiles", "lat_tile", "lon_tile")
+                valid_tiles = np.isfinite(output.observations).mean(("lon_tile", "lat_tile")) > 0.25
+                output = output[{"tiles": valid_tiles}].reset_index("tiles")
+
+                obs_name = f"{platform_name}_{sensor_name}_{freq:.02f}_{offset:.02}_{pol.lower()}"
+                output_file = obs_name + ".nc"
+                output_path = base_path / get_output_path(time) / output_file
+                output_path.parent.mkdir(parents=True, exist_ok=True)
+
+                if output_path.exists():
+                    data = xr.load_dataset(output_path)
+                    old_tiles = set(zip(data.tiles_meridional.data, data.tiles_zonal.data))
+                    new_tiles = list(zip(output.tiles_meridional.data, output.tiles_zonal.data))
+                    tile_mask = np.array([coords not in old_tiles for coords in new_tiles])
+                    new_data = xr.concat((data, output[{"tiles": tile_mask}]), "tiles")
+                    data.to_netcdf(output_path, encoding=encoding)
+                else:
+                    output.to_netcdf(output_path, encoding=encoding)
 
 
         swath_ind += 1
