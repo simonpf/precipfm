@@ -15,7 +15,8 @@ from pansat.products.model.geos import (
     inst3_2d_asm_nx,
     tavg1_2d_lnd_nx,
     tavg1_2d_flx_nx,
-    tavg1_2d_rad_nx
+    tavg1_2d_rad_nx,
+    tavg1_2d_flx_nx_fc,
 )
 import xarray as xr
 
@@ -29,6 +30,9 @@ DYNAMIC_PRODUCTS = [
     tavg1_2d_flx_nx,
     tavg1_2d_rad_nx,
 ]
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 def download_dynamic(year: int, month: int, day: int, output_path: Path) -> None:
@@ -107,3 +111,53 @@ def download_dynamic(year: int, month: int, day: int, output_path: Path) -> None
         date = to_datetime(data_t.time.data)
         output_file = date.strftime("geos_%Y%m%d%H%M%S.nc")
         data_t.to_netcdf(output_path / output_file, encoding=encoding)
+
+
+def download_geos_forecast(year: int, month: int, day: int, output_path: Path) -> None:
+    """
+    Download dynamic GEOS precipitation forecasts results for a given day and year.
+
+    Args:
+        year: The year
+        day: The day
+        output_path: A path object pointing to the directory to which to download the data.
+    """
+    start_time = datetime(year, month, day)
+    end_time = start_time + timedelta(hours=23, minutes=59)
+    start_time = to_datetime64(start_time)
+    end_time = to_datetime64(end_time)
+    init_times = np.arange(start_time, end_time, np.timedelta64(6, "h"))
+
+    output_path = Path(output_path)
+    output_folder = output_path / f"{year:04}" / f"{month:02}" / f"{day:02}"
+    output_folder.mkdir(exist_ok=True, parents=True)
+
+    for init_time in init_times:
+        LOGGER.info(
+            "Extracting forecasts for initialization time %s.",
+            init_time
+        )
+        geos_recs = tavg1_2d_flx_nx_fc.get(
+            TimeRange(init_time + np.timedelta64(3, "h"))
+        )
+        print(geos_recs)
+
+        if len(geos_recs) == 0:
+            LOGGER.info(
+                "No forecasts found for initialization time %s.",
+                init_time
+            )
+            continue
+
+        geos_data = []
+        for rec in geos_recs:
+            with xr.open_dataset(rec.local_path) as data:
+                data = data[["PRECTOT"]].compute()
+                geos_data.append(data)
+
+        geos_data = xr.concat(geos_data, dim="time")
+        geos_data = geos_data.sortby("time")
+
+        init_time = to_datetime(init_time)
+        filename = init_time.strftime("geos_forecast_%Y%m%d_%H.nc")
+        geos_data.to_netcdf(output_folder / filename)
