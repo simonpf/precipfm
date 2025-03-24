@@ -18,8 +18,9 @@ from pansat.time import to_datetime64, to_datetime
 import torch
 from torch import nn
 from torch.utils.data import Dataset
-import xarray as xr
 import numpy as np
+import xarray as xr
+import yaml
 
 from precipfm.merra import (
     STATIC_SURFACE_VARS,
@@ -29,6 +30,15 @@ from precipfm.merra import (
 
 
 LOGGER = logging.getLogger(__name__)
+
+
+POLARIZATIONS = {
+    "NONE": 0,
+    "H": 1,
+    "V": 2,
+    "QH": 3,
+    "QV": 4
+}
 
 
 @cache
@@ -339,7 +349,7 @@ class MERRAInputData(Dataset):
         lats = static_data.latitude.data
 
         if self._pos_sig is None:
-            self._pos_sig = get_position_signal(lons, lats, kind="fourier")
+            self._pos_sig = np.deg2rad(get_position_signal(lons, lats, kind="fourier"))
         pos_sig = torch.tensor(self._pos_sig)
 
         n_time = 4
@@ -595,7 +605,7 @@ class PrecipForecastDataset(MERRAInputData):
         files = []
         pattern = re.compile(r"merra_(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})\.nc")
 
-        for path in sorted(list(root_dir.glob("dynamic/**/merra2_*.nc"))):
+        for path in sorted(list(root_dir.rglob("merra2_*.nc"))):
             try:
                 date = datetime.strptime(path.name, "merra2_%Y%m%d%H%M%S.nc")
                 date64 = to_datetime64(date)
@@ -717,7 +727,8 @@ class DirectPrecipForecastDataset(PrecipForecastDataset):
             self,
             root_dir: Union[Path, str],
             time_step: int = 3,
-            max_steps: int = 24
+            max_steps: int = 24,
+            climate: bool = True
     ):
         """
         Args:
@@ -728,6 +739,7 @@ class DirectPrecipForecastDataset(PrecipForecastDataset):
         self.input_time = -time_step
         self.time_step = time_step
         self.max_steps = max_steps
+        self.climate = climate
 
         self.root_dir = Path(root_dir)
         self.input_times, self.input_files = self.find_merra_files(self.root_dir)
@@ -810,8 +822,14 @@ class DirectPrecipForecastDataset(PrecipForecastDataset):
             output_time = self.output_times[output_ind]
             lead_time = (output_time - max(input_times)).astype("timedelta64[h]").astype(np.float32)
             x["lead_time"] = torch.tensor(lead_time).to(dtype=torch.float32)
+
+            if self.climate:
+                climate = load_climatology(self.root_dir, output_time)
+                x["climate"] = pad(torch.tensor(climate))
+
             with xr.load_dataset(self.root_dir / output_file) as data:
                 precip = torch.tensor(data.surface_precip.data.astype(np.float32))
+
             return x, precip
 
         except Exception as exc:
@@ -850,6 +868,7 @@ class DirectPrecipForecastDataset(PrecipForecastDataset):
         input_time = self.input_time * torch.ones(self.max_steps)
         lead_time = self.time_step * torch.arange(1, self.max_steps + 1).to(dtype=torch.float32)
 
+
         x = {
             "x": dynamic_in,
             "static": static_in,
@@ -859,18 +878,15 @@ class DirectPrecipForecastDataset(PrecipForecastDataset):
         return x
 
         
-
-
 class ObservationLoader(Dataset):
     """
     PyTorch dataset for loading global satellite observations.
     """
-
     def __init__(
             self,
             observation_path: Path,
             observation_layers: int = 32,
-            n_tiles: Tuple[int, int] = (8, 18),
+            n_tiles: Tuple[int, int] = (12, 18),
             tile_size: Tuple[int, int] = (30, 32)
     ):
         """
@@ -882,6 +898,11 @@ class ObservationLoader(Dataset):
         self.n_tiles = n_tiles
         self.tile_size = tile_size
         self.rng = np.random.default_rng(seed=42)
+        self.time_step = 3
+        self.freq_min = 1.0
+        self.freq_max = 30e3
+        self.file_regexp = None
+
 
     def worker_init_fn(self, w_id: int) -> None:
         """
@@ -892,47 +913,136 @@ class ObservationLoader(Dataset):
         self.rng = np.random.default_rng(seed)
 
 
-    def load_observations(self, time: np.datetime64):
+    def find_files(self, path: Path) -> List[Path]:
+        """
+        Find all input files in YYY/mm/dd/HH folder.
+
+        Args:
+             path: The path in which to look for files.
+        """
+
+        files = np.random.permutation(sorted(list(path.glob("*.nc"))))
+        if self.file_regexp is None:
+            return files
+        return [path for path in files if self.file_regexp.match(path.name)]
+
+    def get_minmax(self, name: str) -> Tuple[float, float]:
+        with xr.open_dataset(self.observation_path / "stats.nc") as stats:
+            if f"{name}_min" not in stats:
+                return np.nan, np.nan
+            min_val = stats[f"{name}_min"].data
+            max_val = stats[f"{name}_max"].data
+        return min_val, max_val
+
+    def load_observations(self, time: np.datetime64, offset: Optional[int] = None):
         """
         Load observations for a given time.
         """
         date = to_datetime(time)
         path = self.observation_path / date.strftime("%Y/%m/%d/%H/")
 
+        observations = torch.nan * torch.zeros(self.n_tiles + (self.observation_layers, 1) + self.tile_size)
+        meta_data = torch.zeros(self.n_tiles + (self.observation_layers, 8) + self.tile_size)
+
+        if not path.exists():
+            LOGGER.warning(
+                "No observations for time %s.", time
+            )
+            return observations, meta_data
+
+        layer_ind = np.zeros(self.n_tiles, dtype=np.int64)
+
+        files = self.find_files(path)
+
+        for path in files:
+            data = xr.load_dataset(path)
+            row_inds = data.tiles_meridional.data
+            col_inds = data.tiles_zonal.data
+            l_inds = layer_ind[row_inds, col_inds]
+
+            obs_name = data.attrs["obs_name"]
+            min_val, max_val = self.get_minmax(obs_name)
+            obs = torch.tensor(data.observations.data.astype(np.float32))[:, None]
+            obs_n = -1.0 +  2.0 * (obs - min_val) / (max_val - min_val)
+            observations[row_inds, col_inds, l_inds] = obs_n.to(torch.float32)
+
+            if offset is None:
+                offset = 0.0
+
+            # Load meta data
+            if "observation_relative_time" in data:
+                rel_time = data.observation_relative_time.data / (self.time_step * 3600) + offset
+                meta_data[row_inds, col_inds, l_inds, 0] = torch.tensor(rel_time)
+            else:
+                rel_time = data.attrs["observation_relative_time"] / (self.time_step * 3600) + offset
+                meta_data[row_inds, col_inds, l_inds, 0] = rel_time
+
+
+            freq_max = np.log10(self.freq_max)
+            freq_min = np.log10(self.freq_min)
+            freq = np.log10(data.attrs["frequency"])
+            meta_data[row_inds, col_inds, l_inds, 1] = 2.0 * (freq - freq_min)  / (freq_max - freq_min)
+            meta_data[row_inds, col_inds, l_inds, 2] = 0.0
+            pol = POLARIZATIONS.get(data.attrs["polarization"].upper(), 0)
+            meta_data[row_inds, col_inds, l_inds, 3 + pol] = 1.0
+
+            layer_ind[row_inds, col_inds] += 1
+            if self.observation_layers <= layer_ind.max() :
+                break
+
+        return observations, meta_data
+
+
+class DirectPrecipForecastWithObsDataset(DirectPrecipForecastDataset):
+    """
+    A PyTorch Dataset for loading precipitation forecast training data for direct forecasts without
+    unrolling.
+    """
+    def __init__(
+            self,
+            root_dir: Union[Path, str],
+            time_step: int = 3,
+            max_steps: int = 24,
+            sentinel: float = -3.0,
+            n_tiles: Tuple[int, int] = (12, 18),
+            tile_size: Tuple[int, int] = (30, 32),
+            climate: bool = False,
+    ):
+        """
+        Args:
+            root_dir (str): Root directory containing year/month/day folders.
+            time_step: The forecast time step.
+            max_steps: The maximum number of timesteps to forecast precipitation.
+        """
+        root_dir = Path(root_dir)
+        super().__init__(root_dir=root_dir, time_step=time_step, max_steps=max_steps, climate=climate)
+        self.rng = np.random.default_rng(seed=42)
+        self.obs_loader = ObservationLoader(
+            root_dir / "obs",
+            n_tiles=n_tiles,
+            tile_size=tile_size,
+            observation_layers=16
+        )
+
+    def __getitem__(self, ind: int) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        Load and return a single data point from the dataset.
+        """
+        x, y = super().__getitem__(ind)
+        input_times = [self.input_times[ind] for ind in self.input_indices[ind]]
         obs = []
         meta = []
+        for time_ind, time in enumerate(input_times):
+            obs_t, meta_t = self.obs_loader.load_observations(time, offset=len(input_times) - time_ind - 1)
+            obs.append(obs_t)
+            meta.append(meta_t)
+        obs = torch.stack(obs, 0)
+        obs_mask = torch.isnan(obs)
+        obs = torch.nan_to_num(obs, nan=-1.5)
+        meta = torch.stack(meta, 0)
 
-        index = xr.load_dataset(path / "index.nc")
-        mask = index.availability_mask
+        x["obs"] = obs
+        x["obs_mask"] = obs_mask
+        x["obs_meta"] = meta
 
-        for row_ind in range(self.n_tiles[0]):
-            row_start = trunc(row_ind * self.tile_size[0] / 4)
-            row_end = row_start + ceil(self.tile_size[0] / 4)
-            for col_ind in range(self.n_tiles[1]):
-
-                tile_obs = []
-                tile_meta = []
-
-                col_start = trunc(row_ind * self.tile_size[1] / 8)
-                col_end = col_start + ceil(self.tile_size[1] / 8)
-                tile_mask = mask[{"y": slice(row_start, row_end), "x": slice(col_start, col_end)}]
-                platforms = index.platforms.data[np.where(tile_mask.any(("x", "y")).data)]
-
-                available_files = []
-                for platform in platforms:
-                    available_files += list(index[platform].data)
-                available_files = self.rng.permutation(available_files)
-
-                row_slice = slice(row_start * 4, row_end * 4)
-                col_slice = slice(col_start * 8, col_end * 8)
-
-                for layer_ind in range(self.observation_layers):
-                    if layer_ind < len(available_files):
-                        with xr.open_dataset(path / (available_files[layer_ind] + ".nc")) as data:
-                            channel_obs = data.observations[{"y": row_slice, "x": col_slice}].compute().data
-                        tile_obs.append(torch.tensor(channel_obs))
-                    else:
-                        tile_obs.append(torch.nan * torch.zeros(self.tile_size))
-
-                obs.append(tile_obs)
-        return obs
+        return x, y
