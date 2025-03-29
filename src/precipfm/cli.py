@@ -24,7 +24,7 @@ from precipfm.merra import (
 
 from precipfm import geos
 from precipfm import imerg
-from precipfm.obs import gpm, cpcir
+from precipfm.obs import gpm, cpcir, patmosx
 
 
 # Configure logger
