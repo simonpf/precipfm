@@ -8,6 +8,7 @@ from datetime import datetime, timedelta
 import logging
 from pathlib import Path
 
+import click
 import numpy as np
 from pansat.time import TimeRange, to_datetime64, to_datetime
 from pansat.products.model.geos import (
@@ -82,15 +83,11 @@ def download_dynamic(year: int, month: int, day: int, output_path: Path) -> None
                 data[var].data[1:] = 0.5 * (data[var].data[1:] + data[var].data[:-1])
             new_time = data.time.data - 0.5 * (data.time.data[1] -  data.time.data[0])
             data = data.assign_coords(time=new_time)
-        for var in data:
-            print(var, np.any(np.isnan(data[var].data)))
+
         times = list(data.time.data)
         time_steps = [step for step in time_steps if step in times]
-        print("INDS :: ", data.time)
         inds = [times.index(t_s) for t_s in time_steps]
         data_t = data[{"time": inds}]
-        for var in data_t:
-            print(var, np.any(np.isnan(data_t[var].data)))
 
         all_data.append(data_t)
 
@@ -113,15 +110,25 @@ def download_dynamic(year: int, month: int, day: int, output_path: Path) -> None
         data_t.to_netcdf(output_path / output_file, encoding=encoding)
 
 
+@click.argument('year', type=int)
+@click.argument('month', type=int)
+@click.argument('day', type=int)
+@click.argument('output_path', type=click.Path(writable=True))
 def download_geos_forecast(year: int, month: int, day: int, output_path: Path) -> None:
     """
-    Download dynamic GEOS precipitation forecasts results for a given day and year.
+    Download GEOS precipitation forecasts results for a given day and year.
 
     Args:
-        year: The year
+        year: The year, if set to negative value will download forecasts from the previous day.
         day: The day
         output_path: A path object pointing to the directory to which to download the data.
     """
+    if year < 1000:
+        today = datetime.today() - timedelta(days=1)
+        year = today.year
+        month = today.month
+        day = today.day
+
     start_time = datetime(year, month, day)
     end_time = start_time + timedelta(hours=23, minutes=59)
     start_time = to_datetime64(start_time)
@@ -140,7 +147,6 @@ def download_geos_forecast(year: int, month: int, day: int, output_path: Path) -
         geos_recs = tavg1_2d_flx_nx_fc.get(
             TimeRange(init_time + np.timedelta64(3, "h"))
         )
-        print(geos_recs)
 
         if len(geos_recs) == 0:
             LOGGER.info(

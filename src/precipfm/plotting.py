@@ -162,3 +162,28 @@ def plot_tiles(tnsr: torch.Tensor, global_y, global_x, local_y, local_x, channel
             m = ax.pcolormesh(x, y, tile, norm=norm)
 
     plt.colorbar(m)
+
+
+def plot_tiles_compressed(dataset: xr.Dataset):
+    """
+    Plot tiles xr.Dataset containing compressed tiles.
+    """
+    f, ax = plt.subplots(1, 1, figsize=(10, 5))
+    gap = 3
+    obs = dataset.observations.data
+    _, height, width = obs.shape
+    row_inds = dataset.tiles_meridional.data
+    col_inds = dataset.tiles_zonal.data
+
+    norm = Normalize(np.nanmin(obs), np.nanmax(obs))
+
+    for obs_t, row_ind, col_ind in zip(obs, row_inds, col_inds):
+        start = (width + gap) * col_ind
+        end = start + width
+        x = np.arange(start, end)
+        start = (height + gap) * row_ind
+        end = start + height
+        y = np.arange(start, end)
+        m = ax.pcolormesh(x, y, obs_t, norm=norm)
+
+    plt.colorbar(m)

@@ -24,7 +24,7 @@ from precipfm.merra import (
 
 from precipfm import geos
 from precipfm import imerg
-from precipfm.obs import gpm
+from precipfm.obs import gpm, cpcir
 
 
 # Configure logger
@@ -132,7 +132,63 @@ def extract_data_dynamic(
 @click.argument('days', nargs=-1, type=int, required=False, callback=validate_date)
 @click.argument('output_path', type=click.Path(writable=True), callback=validate_output_path)
 @click.option('--n_processes', default=1, type=int, help="Number of processes to use for downloading data.")
-def extract_geo_data(
+def extract_geos_data(
+        year: int,
+        month: int,
+        days: List[int],
+        output_path: Path,
+        n_processes: int = 1
+) -> None:
+    """
+    Extract data for a given YEAR, MONTH, and optional DAY, and write output to to OUTPUT_PATH.
+
+    YEAR and MONTH are required. DAY is optional and defaults to extracting data for
+    all days of the month.
+    """
+    if days:
+        logger.info(f"Extracting data for {year}-{month:02d} on days {', '.join(map(str, days))} to {output_path}.")
+    else:
+        logger.info(f"Extracting data for all days in {year}-{month:02d} to {output_path}.")
+
+
+    if len(days) == 0:
+        _, n_days = monthrange(year, month)
+        days = list(range(1, n_days + 1))
+
+
+    if n_processes > 1:
+        LOGGER.info(f"[bold blue]Using {n_processes} processes for downloading data.[/bold blue]")
+        tasks = [(year, month, d, output_path) for d in days]
+
+        with ProcessPoolExecutor(max_workers=n_processes) as executor, Progress(console=console) as progress:
+            task_id = progress.add_task("Extracting data:", total=len(tasks))
+            future_to_task = {executor.submit(geos.download_dynamic, *task): task for task in tasks}
+            for future in as_completed(future_to_task):
+                task = future_to_task[future]
+                try:
+                    future.result()
+                except Exception as e:
+                    logger.exception(f"Task {task} failed with error: {e}")
+                finally:
+                    progress.update(task_id, advance=1)
+    else:
+        with Progress(console=console) as progress:
+            task_id = progress.add_task("Extracting data:", total=len(days))
+            for d in days:
+                try:
+                    geos.download_dynamic(year, month, d, output_path)
+                except Exception as e:
+                    logger.exception(f"Error processing day {d}: {e}")
+                finally:
+                    progress.update(task_id, advance=1)
+
+@precipfm.command(name="extract_geos_data")
+@click.argument('year', type=int, callback=validate_date)
+@click.argument('month', type=int, callback=validate_date)
+@click.argument('days', nargs=-1, type=int, required=False, callback=validate_date)
+@click.argument('output_path', type=click.Path(writable=True), callback=validate_output_path)
+@click.option('--n_processes', default=1, type=int, help="Number of processes to use for downloading data.")
+def extract_geos_forecast_data(
         year: int,
         month: int,
         days: List[int],
@@ -253,3 +309,5 @@ def extract_imerg_data(
 
 
 precipfm.command(name="extract_gpm_data")(gpm.process_sensor_data)
+precipfm.command(name="extract_cpcir_data")(cpcir.process_data)
+precipfm.command(name="extract_patmosx_data")(patmosx.extract_observations)

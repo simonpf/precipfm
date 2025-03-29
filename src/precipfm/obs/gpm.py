@@ -28,7 +28,7 @@ from pansat.products.satellite.gpm import (
     l1c_xcal2016v_noaa19_mhs_v07a,
     l1c_xcal2016v_noaa18_mhs_v07a,
     l1c_xcal2019v_metopc_mhs_v07a,
-    l1c_xcal2016_metopb_mhs,
+    l1c_xcal2016v_metopb_mhs_v07a,
     l1c_xcal2016c_gpm_gmi_v07a,
     l1c_xcal2016v_gcomw1_amsr2_v07a
 )
@@ -62,24 +62,24 @@ SSMIS_PRODUCTS = [
 
 SENSORS = {
     "ssmis": [
-        ("f16", "imager", 60e3, [l1c_xcal2021v_f16_ssmis_v07a, l1c_xcal2021v_f16_ssmis_v07b]),
-        ("f17", "imager", 60e3, [l1c_xcal2021v_f17_ssmis_v07a, l1c_xcal2021v_f17_ssmis_v07b]),
+        ("f16", 60e3, [l1c_xcal2021v_f16_ssmis_v07a, l1c_xcal2021v_f16_ssmis_v07b]),
+        ("f17", 60e3, [l1c_xcal2021v_f17_ssmis_v07a, l1c_xcal2021v_f17_ssmis_v07b]),
     ],
     "atms": [
-        ("noaa20", "sounder", 60e3, [l1c_xcal2019v_noaa20_atms_v07a]),
-        ("snpp", "sounder", 60e3, [l1c_xcal2019v_npp_atms_v07a]),
+        ("noaa20", 60e3, [l1c_xcal2019v_noaa20_atms_v07a]),
+        ("snpp", 60e3, [l1c_xcal2019v_npp_atms_v07a]),
     ],
     "mhs": [
-        ("noaa19", "sounder", 60e3, [l1c_xcal2016v_noaa19_mhs_v07a]),
-        ("noaa18", "sounder", 60e3, [l1c_xcal2016v_noaa18_mhs_v07a]),
-        ("metop_b", "sounder", 60e3, [l1c_xcal2016_metopb_mhs]),
-        ("metop_c", "sounder", 60e3, [l1c_xcal2019v_metopc_mhs_v07a]),
+        ("noaa19", 60e3, [l1c_xcal2016v_noaa19_mhs_v07a]),
+        ("noaa18", 60e3, [l1c_xcal2016v_noaa18_mhs_v07a]),
+        ("metop_b", 60e3, [l1c_xcal2016v_metopb_mhs_v07a]),
+        ("metop_c", 60e3, [l1c_xcal2019v_metopc_mhs_v07a]),
     ],
     "gmi": [
-        ("gpm", "imager", 20e3, [l1c_xcal2016c_gpm_gmi_v07a]),
+        ("gpm", 20e3, [l1c_xcal2016c_gpm_gmi_v07a]),
     ],
     "amsr2": [
-        ("gcomw1", "imager", 20e3, [l1c_xcal2016v_gcomw1_amsr2_v07a]),
+        ("gcomw1", 20e3, [l1c_xcal2016v_gcomw1_amsr2_v07a]),
     ],
 }
 
@@ -88,7 +88,6 @@ def extract_observations(
         base_path: Path,
         gpm_file: FileRecord,
         target_grid: AreaDefinition,
-        sensor_type: str,
         platform_name: str,
         sensor_name: str,
         radius_of_influence: float,
@@ -101,8 +100,9 @@ def extract_observations(
     Args:
         base_path: Path object pointing to the directory to which to write the extracted observations.
         gpm_file: A pansat FileRecord pointing to a GPM input file.
-        sensor_type: A string specifying the sensor type.
+        platform_name: The name of the satellite platform the sensor is on.
         radius_of_incluence: Radius of influence to use for resampling.
+
     """
     l1c_obs = gpm_file.product.open(gpm_file)
     if "latitude" in l1c_obs:
@@ -266,16 +266,26 @@ def extract_observations_day(
         month: int,
         day: int,
         output_path: Path
-):
+) -> None:
+    """
+    Extract GPM observations for a given day.
+
+    Args:
+        sensor: The name of the sensor.
+        year: Integer specfiying the year.
+        month: Integer specfiying the month.
+        day: Integer specfiying the day.
+        output_path: A path object pointing to the directory to which to write the extracted observations.
+    """
     sensors = SENSORS[sensor]
-    for platform_name, sensor_type, roi, pansat_products in sensors:
+    for platform_name, roi, pansat_products in sensors:
         for pansat_product in pansat_products:
             start = datetime(year, month, day)
             end = start + timedelta(days=1)
             recs = pansat_product.get(TimeRange(start, end))
             for rec in recs:
                 try:
-                    extract_observations(output_path, rec, MERRA, sensor_type, platform_name, sensor, roi)
+                    extract_observations(output_path, rec, MERRA, platform_name, sensor, roi)
                 except:
                     LOGGER.exception(
                         "Encountered an error when processing input file %s.",
