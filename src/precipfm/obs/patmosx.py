@@ -7,6 +7,7 @@ This module provides functionality to extract observation data from the PATMOS-x
 from pathlib import Path
 from typing import Tuple
 
+import click
 from scipy.constants import speed_of_light
 import numpy as np
 from pansat.file_record import FileRecord
