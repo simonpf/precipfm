@@ -188,7 +188,7 @@ def extract_observations_day(
 @click.argument('year', type=int)
 @click.argument('month', type=int)
 @click.argument('output_path', type=click.Path())
-@click.option("n_processes", help="The number of process to use for the data extraction.")
+@click.option("--n_processes", help="The number of process to use for the data extraction.")
 def extract_observations(
         year:int ,
         month: int,
