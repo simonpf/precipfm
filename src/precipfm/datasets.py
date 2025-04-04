@@ -308,7 +308,7 @@ class MERRAInputData(Dataset):
         files = np.array(files)
         return times, files
 
-    def load_dynamic_data(self, path: Path) -> torch.Tensor:
+    def load_dynamic_data(self, path: Path, slcs: Optional[Dict[str, slice]] = None) -> torch.Tensor:
         """
         Load all dynamic data from a given input file and return the data.
 
@@ -320,11 +320,13 @@ class MERRAInputData(Dataset):
             [var + levels (channels), lat, lon].
         """
         all_data = []
+        if slcs is None:
+            slcs = {}
         with xr.open_dataset(self.root_dir / path) as data:
             for var in SURFACE_VARS:
-                all_data.append(data[var].data[None].astype(np.float32))
+                all_data.append(data[var].__getitem__(slcs).data[None].astype(np.float32))
             for var in VERTICAL_VARS:
-                all_data.append(data[var].astype(np.float32))
+                all_data.append(data[var].__getitem__(slcs).astype(np.float32))
         all_data = torch.tensor(np.concatenate(all_data, axis=0))
         return all_data
 
@@ -560,6 +562,166 @@ class GEOSInputData(MERRAInputData):
         return x, y
 
 
+class PrecipDiagnosisDataset(MERRAInputDataset):
+    """
+    A PyTorch Dataset for loading MERRA2 input data and conincident  precip fields
+    organized into year/month/day folders.
+    """
+    def __init__(self, root_dir: Union[Path, str]):
+        """
+        Args:
+            root_dir (str): Root directory containing year/month/day folders.
+            time_step: The forecast time step.
+            n_steps: The number of forecast steps to perform.
+        """
+        self.root_dir = Path(root_dir)
+        self.input_times, self.input_files = self.find_merra_files(self.root_dir)
+        self.output_times, self.output_files = self.find_precip_files(self.root_dir)
+
+        self.input_indices, self.output_indices = self.calculate_valid_samples()
+        self.init_rng()
+
+    def init_rng(self, w_id=0):
+        """
+        Initialize random number generator.
+
+        Args:
+            w_id: The worker ID which of the worker process..
+        """
+        if self.validation:
+            seed = 42
+        else:
+            seed = int.from_bytes(os.urandom(4), "big") + w_id
+
+        self.rng = np.random.default_rng(seed)
+        self.n_workers = 1
+
+    def worker_init_fn(self, w_id: int) -> None:
+        """
+        Initializes the worker state for parallel data loading.
+
+        Args:
+            w_id: The ID of the worker.
+        """
+        self.init_rng(w_id)
+        winfo = torch.utils.data.get_worker_info()
+        n_workers = winfo.num_workers
+        self.n_workers = n_workers
+        self.files = self.files[w_id::n_workers]
+        self.pool = ThreadPoolExecutor(max_workers=1)
+
+
+    def find_merra_files(self, root_dir: Path) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        Gather all available MERRA2 files paths and extract available times.
+
+        Args:
+            root_dir: Path object pointing to the root of the data directory.
+
+        Return:
+            A tuple containing arrays of available inputs times and corresponding file
+            paths.
+        """
+        times = []
+        files = []
+        pattern = re.compile(r"merra_(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})\.nc")
+
+        for path in sorted(list(root_dir.rglob("merra2_*.nc"))):
+            try:
+                date = datetime.strptime(path.name, "merra2_%Y%m%d%H%M%S.nc")
+                date64 = to_datetime64(date)
+
+                files.append(str(path.relative_to(root_dir)))
+                times.append(date64)
+            except ValueError:
+                continue
+
+        times = np.array(times)
+        files = np.array(files)
+        return times, files
+
+
+    def find_precip_files(self, root_dir) -> np.ndarray:
+        """
+        Find precip files for training.
+        """
+        times = []
+        files = []
+        pattern = re.compile(r"imerg_(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})\.nc")
+
+        for path in sorted(list(root_dir.glob("imerg/**/imerg_*.nc"))):
+            try:
+                date = datetime.strptime(path.name, "imerg_%Y%m%d%H%M%S.nc")
+                date64 = to_datetime64(date)
+                files.append(str(path.relative_to(root_dir)))
+                times.append(date64)
+            except ValueError:
+                continue
+
+        times = np.array(times)
+        files = np.array(files)
+        return times, files
+
+
+    def calculate_valid_samples(self) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        A tuple of index arrays containing the indices of input- and output files for all training data
+        samples satifying the requested input and lead time combination.
+
+        Return: A tuple '(input_indices, output_indices)' with `input_indices` of shape
+            '(n_samples, n_input_times)' containing the indices of all the input files for each data
+            samples. Similarly, 'output_indices' is a numpy.ndarray of shape '(n_samples, n_lead_times)'
+            containing the corresponding file indices to load for the output data.
+        """
+        input_indices = []
+        output_indices = []
+        for ind in range(self.input_times.size):
+            sample_time = self.input_times[ind]
+            output_ind = np.searchsorted(self.output_times, sample_time)
+            if sample_time == self.output_times[output_ind]:
+                input_indices.append(ind)
+                output_indices.append(output_ind)
+        return np.array(input_indices), np.array(output_indices)
+
+    def __len__(self):
+        return len(self.input_indices)
+
+    def __getitem__(self, ind: int) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        Load and return a single data point from the dataset.
+        """
+        try:
+
+            scene_size = self.scene_size
+            row_start = self.rng.integers(0, 361 - scene_size)
+            col_start = self.rng.integers(0, 576 - scene_size)
+            row_slice = slice(row_start, row_start + scene_size)
+            col_slice = slice(row_start, row_start + scene_size)
+            slcs = {
+                "latitude": row_slice,
+                "longitude": col_slice
+            }
+
+            input_ind = self.input_indices[ind]
+            dynamic_in = self.load_dynamic_data(self.input_files[input_ind], slcs=slcs)
+
+            output_ind = self.output_indices[ind]
+            with xr.open_dataset(self.output_files[output_ind]) as precip_data:
+                precip_data = precip_data[slcs].data
+
+            return dynamic_in, precip_data
+
+        except Exception as exc:
+            raise exc
+            LOGGER.exception(
+                "Encountered an error when load training sample %s. Falling back to another "
+                " randomly-chosen sample.",
+                ind
+            )
+            new_ind = np.random.randint(0, len(self))
+            return self[new_ind]
+
+
 class PrecipForecastDataset(MERRAInputData):
     """
     A PyTorch Dataset for loading 3-hourly MERRA2 data and corresponding precip fields
@@ -687,6 +849,8 @@ class PrecipForecastDataset(MERRAInputData):
             ]
             static_in = [self.load_static_data(static_time) for static_time in static_times]
 
+            climate = [torch.tensor(load_climatology(self.root_dir, time)) for time in self.output_times]
+
             input_time = self.input_time
             lead_time = self.time_step
 
@@ -696,6 +860,7 @@ class PrecipForecastDataset(MERRAInputData):
             x = {
                 "x": pad(torch.stack(dynamic_in, 0)),
                 "static": pad(torch.stack(static_in, 0)),
+                "climate": pad(torch.stack(climate, 0)),
                 "input_time": torch.tensor(input_time).to(dtype=torch.float32),
                 "lead_time": torch.tensor(lead_time).to(dtype=torch.float32)
             }
