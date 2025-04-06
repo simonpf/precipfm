@@ -133,7 +133,7 @@ class MERRAInputData(Dataset):
         if lead_times is None:
             lead_times = [3]
         self.root_dir = Path(root_dir)
-        self.times, self.input_files = self.find_files(self.root_dir / "dynamic")
+        self.times, self.input_files = self.find_files(self.root_dir)
 
         self._pos_sig = None
         self.input_times = input_times
@@ -294,7 +294,7 @@ class MERRAInputData(Dataset):
         files = []
         pattern = re.compile(r"merra_(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})\.nc")
 
-        for path in sorted(list(root_dir.glob("**/merra2_*.nc"))):
+        for path in sorted(list(root_dir.glob("dynamic/**/merra2_*.nc"))):
             try:
                 date = datetime.strptime(path.name, "merra2_%Y%m%d%H%M%S.nc")
                 date64 = to_datetime64(date)
@@ -562,12 +562,17 @@ class GEOSInputData(MERRAInputData):
         return x, y
 
 
-class PrecipDiagnosisDataset(MERRAInputDataset):
+class PrecipDiagnosisDataset(MERRAInputData):
     """
     A PyTorch Dataset for loading MERRA2 input data and conincident  precip fields
     organized into year/month/day folders.
     """
-    def __init__(self, root_dir: Union[Path, str]):
+    def __init__(
+            self,
+            root_dir: Union[Path, str],
+            scene_size: int = 128,
+            validation: bool = False
+    ):
         """
         Args:
             root_dir (str): Root directory containing year/month/day folders.
@@ -575,6 +580,9 @@ class PrecipDiagnosisDataset(MERRAInputDataset):
             n_steps: The number of forecast steps to perform.
         """
         self.root_dir = Path(root_dir)
+        self.scene_size = scene_size
+        self.validation = validation
+
         self.input_times, self.input_files = self.find_merra_files(self.root_dir)
         self.output_times, self.output_files = self.find_precip_files(self.root_dir)
 
@@ -678,7 +686,7 @@ class PrecipDiagnosisDataset(MERRAInputDataset):
         for ind in range(self.input_times.size):
             sample_time = self.input_times[ind]
             output_ind = np.searchsorted(self.output_times, sample_time)
-            if sample_time == self.output_times[output_ind]:
+            if output_ind < len(self.output_times) and sample_time == self.output_times[output_ind]:
                 input_indices.append(ind)
                 output_indices.append(output_ind)
         return np.array(input_indices), np.array(output_indices)
@@ -706,8 +714,8 @@ class PrecipDiagnosisDataset(MERRAInputDataset):
             dynamic_in = self.load_dynamic_data(self.input_files[input_ind], slcs=slcs)
 
             output_ind = self.output_indices[ind]
-            with xr.open_dataset(self.output_files[output_ind]) as precip_data:
-                precip_data = precip_data[slcs].data
+            with xr.open_dataset(self.root_dir / self.output_files[output_ind]) as precip_data:
+                precip_data = precip_data.surface_precip[slcs].data
 
             return dynamic_in, precip_data
 
@@ -943,13 +951,14 @@ class DirectPrecipForecastDataset(PrecipForecastDataset):
                 sample_time + np.timedelta64(t_i * self.time_step, "h") for t_i in np.arange(1, self.max_steps + 1)
             ]
             output_times = [t_o for t_o in output_times if t_o in self.output_times]
-            output_ind = np.searchsorted(self.output_times, sample_time)
             valid = all([t_i in self.input_times for t_i in input_times])
             if valid and len(output_times) > 0:
                 input_indices.append([ind - self.time_step // 3, ind])
-                time_diffs = [(t_o - sample_time).astype("timedelta64[h]") for t_o in output_times]
-                inds = [output_ind + (t_d // 3).astype(int) for t_d in time_diffs]
-                output_indices.append(inds + [-1] * (self.max_steps - len(inds)))
+                output_inds = []
+                for output_time in output_times:
+                    output_ind = np.searchsorted(self.output_times, output_time)
+                    output_inds.append(output_ind)
+                output_indices.append(output_inds + [-1] * (self.max_steps - len(output_inds)))
         return np.array(input_indices), np.array(output_indices)
 
     def __len__(self):
@@ -1186,7 +1195,7 @@ class DirectPrecipForecastWithObsDataset(DirectPrecipForecastDataset):
             root_dir / "obs",
             n_tiles=n_tiles,
             tile_size=tile_size,
-            observation_layers=16
+            observation_layers=32
         )
 
     def __getitem__(self, ind: int) -> Tuple[torch.Tensor, torch.Tensor]:
@@ -1201,7 +1210,7 @@ class DirectPrecipForecastWithObsDataset(DirectPrecipForecastDataset):
             obs_t, meta_t = self.obs_loader.load_observations(time, offset=len(input_times) - time_ind - 1)
             obs.append(obs_t)
             meta.append(meta_t)
-        obs = torch.stack(obs, 0)
+        obs = torch.flip(torch.stack(obs, 0), (1, -2))
         obs_mask = torch.isnan(obs)
         obs = torch.nan_to_num(obs, nan=-1.5)
         meta = torch.stack(meta, 0)
