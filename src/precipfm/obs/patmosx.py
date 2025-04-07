@@ -20,6 +20,7 @@ from pansat.time import to_datetime64
 from pansat.products.satellite.ncei import patmosx
 from rich.progress import Progress
 from pyresample import AreaDefinition
+from rich.progress import track
 import xarray as xr
 
 from ..grids import MERRA

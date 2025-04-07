@@ -49,6 +49,7 @@ def load_model(
         checkpoint_path: Path | str,
         auxiliary_path: Path | str,
         configuration: str = "large",
+        obs: bool = False
 ):
     """
     Load PrithviWxC model.
@@ -97,10 +98,12 @@ def load_model(
     kwargs["static_input_scalers_mu"] = static_mu
     kwargs["static_input_scalers_sigma"] = static_sig
     kwargs["output_scalers"] = output_sig ** 0.5
-    kwargs["residual"] = "climate"
+    kwargs["residual"] = "none"
     kwargs["masking_mode"] = "local"
     kwargs["decoder_shifting"] = True
-    kwargs["mask_ratio_inputs"] = 0.99
+    kwargs["mask_ratio_inputs"] = 0.0
+    if obs:
+        kwargs["obs_layers"] = 32
 
     model = PrithviWxC(**kwargs)
 
@@ -122,5 +125,5 @@ def load_model(
         state_dict = torch.load(checkpoint_path, weights_only=False)
         if "model_state" in state_dict:
             state_dict = state_dict["model_state"]
-        model.load_state_dict(state_dict, strict=True)
+        #model.load_state_dict(state_dict, strict=False)
     return model

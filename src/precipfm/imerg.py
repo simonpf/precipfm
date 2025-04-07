@@ -9,7 +9,7 @@ from pathlib import Path
 
 import numpy as np
 from scipy.stats import binned_statistic_2d
-from pansat import FileRecord, Geometry, TimeRange
+from pansat import TimeRange
 from pansat.products.satellite.gpm import l3b_hhr_3imerg_ms_mrg_07b
 from pansat.time import to_datetime
 import xarray as xr

@@ -1051,7 +1051,8 @@ class DirectPrecipForecastDataset(PrecipForecastDataset):
         }
         return x
 
-        
+
+
 class ObservationLoader(Dataset):
     """
     PyTorch dataset for loading global satellite observations.
@@ -1220,3 +1221,104 @@ class DirectPrecipForecastWithObsDataset(DirectPrecipForecastDataset):
         x["obs_meta"] = meta
 
         return x, y
+
+
+class GEOSInputLoader(MERRAInputData):
+    """
+    A PyTorch Dataset for loading 3-hourly GEOS analysis data.
+    """
+    def __init__(
+            self,
+            root_dir: Union[Path, str],
+            time_step: int = 3,
+            n_steps: int = 8,
+            climate: bool = True
+    ):
+        """
+        Args:
+            root_dir (str): Root directory containing year/month/day folders.
+            time_step: The forecast time step.
+            n_steps: The number of forecast steps to perform.
+        """
+        super().__init__(
+            root_dir=root_dir,
+            input_times=[-time_step],
+            lead_times=[time_step]
+        )
+        self.input_time = -time_step
+        self.time_step = time_step
+        self.n_steps = n_steps
+        self.climate = climate
+
+        self.input_times, self.input_files = self.find_geos_files(self.root_dir)
+
+
+    def find_geos_files(self, root_dir: Path) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        Gather all available MERRA2 files paths and extract available times.
+
+        Args:
+            root_dir: Path object pointing to the root of the data directory.
+
+        Return:
+            A tuple containing arrays of available inputs times and corresponding file
+            paths.
+        """
+        times = []
+        files = []
+        pattern = re.compile(r"geos_(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})\.nc")
+
+        for path in sorted(list(root_dir.rglob("geos_*.nc"))):
+            try:
+                date = datetime.strptime(path.name, "geos_%Y%m%d%H%M%S.nc")
+                date64 = to_datetime64(date)
+
+                files.append(str(path.relative_to(root_dir)))
+                times.append(date64)
+            except ValueError:
+                continue
+
+        times = np.array(times)
+        files = np.array(files)
+        return times, files
+
+
+    def get_forecast_input(self, init_time: np.datetime64) -> Dict[str, torch.Tensor]:
+        """
+        Get forecast input data to perform a continuous forecast.
+        """
+        input_times = [init_time + np.timedelta64(t_i * self.time_step, "h") for t_i in [-1, 0]]
+        for input_time in input_times:
+            if input_time not in self.input_times:
+                raise ValueError(
+                    "Required input data for t=%s not available.",
+                    input_time
+                )
+
+        dynamic_in = []
+        for input_time in input_times:
+            ind = np.searchsorted(self.input_times, input_times[-1])
+            dynamic_in.append(self.load_dynamic_data(self.input_files[ind]))
+
+        static_time = self.input_times[-1]
+        static_in = self.load_static_data(static_time)
+
+        pad = partial(nn.functional.pad, pad=((0, 0, 0, -1)))
+        dynamic_in = pad(torch.stack(dynamic_in, 0))[None].repeat(self.n_steps, 1, 1, 1, 1)
+        static_in = pad(static_in)[None].repeat(self.n_steps, 1, 1, 1)
+        input_time = self.input_time * torch.ones(self.n_steps)
+        lead_time = self.time_step * torch.arange(1, self.n_steps + 1).to(dtype=torch.float32)
+
+        if self.climate:
+            output_times = [init_time + step * np.timedelta64(self.time_step, "h") for step in range(1, self.n_steps + 1)]
+            climate = [torch.tensor(load_climatology(self.root_dir, time)) for time in output_times]
+            climate = pad(torch.stack(climate))
+
+        x = {
+            "x": dynamic_in,
+            "static": static_in,
+            "lead_time": lead_time,
+            "input_time": input_time,
+            "climate": climate
+        }
+        return x
