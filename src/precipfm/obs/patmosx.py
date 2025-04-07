@@ -4,6 +4,10 @@ precipfm.data.patmosx
 
 This module provides functionality to extract observation data from the PATMOS-x dataset.
 """
+from calendar import monthrange
+from concurrent.futures import ProcessPoolExecutor
+from datetime import datetime
+import logging
 from pathlib import Path
 from typing import Tuple
 
@@ -11,14 +15,22 @@ import click
 from scipy.constants import speed_of_light
 import numpy as np
 from pansat.file_record import FileRecord
+
 from pansat.time import to_datetime64
+from pansat.products.satellite.ncei import patmosx
+from rich.progress import Progress
 from pyresample import AreaDefinition
 import xarray as xr
 
+from ..grids import MERRA
 from .utils import (
     get_output_path,
     track_stats
 )
+
+
+LOGGER = logging.getLogger(__name__)
+
 
 OBS_VARS = [
     "temp_3_75um_nom",
@@ -72,7 +84,7 @@ def extract_observations(
     """
     patmosx_file = patmosx_file.get()
     start_time = patmosx_file.temporal_coverage.start
-    end_time = start_time + np.timedelta64(1, "D")
+    end_time = to_datetime64(start_time) + np.timedelta64(1, "D")
     time_steps = np.arange(start_time, end_time ,time_step)
 
     platform = patmosx_file.filename.split("_")[2].lower()
@@ -87,6 +99,8 @@ def extract_observations(
         time_dtype = obs_time.dtype
         obs_time = obs_time.astype(np.int64).interp(latitude=lats, longitude=lons, method="nearest").astype(time_dtype)
         for obs_var in OBS_VARS:
+            if obs_var not in patmosx_data:
+                continue
             obs = patmosx_data[obs_var][{"time": 0}].compute()
             obs = obs.interp(latitude=lats, longitude=lons)
 
@@ -188,8 +202,8 @@ def extract_observations_day(
 @click.argument('year', type=int)
 @click.argument('month', type=int)
 @click.argument('output_path', type=click.Path())
-@click.option("--n_processes", help="The number of process to use for the data extraction.")
-def extract_observations(
+@click.option("--n_processes", help="The number of process to use for the data extraction.", default=1)
+def extract_patmosx_data(
         year:int ,
         month: int,
         output_path: Path,
@@ -198,7 +212,6 @@ def extract_observations(
     """
     Extract PATMOS-x  data for a given year, and month, and save the result to the specified output path.
 
-    SENSOR_NAME: Name of the sensor (string)
     YEAR: Year of the data to process (integer)
     MONTH: Month of the data to process (integer)
     OUTPUT_PATH: Path to save the processed data (string/path)
@@ -208,14 +221,13 @@ def extract_observations(
         return
 
     _, n_days = monthrange(year, month)
-    for day in track(range(n_days)):
-        extract_observations_day(sensor_name, year, month, day + 1, output_path)
+    days = list(range(1, n_days + 1))
 
     if n_processes > 1:
         LOGGER.info(f"[bold blue]Using {n_processes} processes for downloading data.[/bold blue]")
         tasks = [(year, month, d, output_path) for d in days]
 
-        with ProcessPoolExecutor(max_workers=n_processes) as executor, Progress(console=console) as progress:
+        with ProcessPoolExecutor(max_workers=n_processes) as executor, Progress() as progress:
             task_id = progress.add_task("Extracting data:", total=len(tasks))
             future_to_task = {executor.submit(extract_observations_day, *task): task for task in tasks}
             for future in as_completed(future_to_task):
@@ -223,16 +235,16 @@ def extract_observations(
                 try:
                     future.result()
                 except Exception as e:
-                    logger.exception(f"Task {task} failed with error: {e}")
+                    LOGGER.exception(f"Task {task} failed with error: {e}")
                 finally:
                     progress.update(task_id, advance=1)
     else:
-        with Progress(console=console) as progress:
+        with Progress() as progress:
             task_id = progress.add_task("Extracting data:", total=len(days))
             for d in days:
                 try:
                     extract_observations_day(year, month, d, output_path)
                 except Exception as e:
-                    logger.exception(f"Error processing day {d}: {e}")
+                    LOGGER.exception(f"Error processing day {d}: {e}")
                 finally:
                     progress.update(task_id, advance=1)

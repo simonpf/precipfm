@@ -310,4 +310,4 @@ def extract_imerg_data(
 
 precipfm.command(name="extract_gpm_data")(gpm.process_sensor_data)
 precipfm.command(name="extract_cpcir_data")(cpcir.process_data)
-precipfm.command(name="extract_patmosx_data")(patmosx.extract_observations)
+precipfm.command(name="extract_patmosx_data")(patmosx.extract_patmosx_data)
