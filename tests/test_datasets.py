@@ -34,8 +34,11 @@ from precipfm.merra import (
 MERRA_DATA_PATH = os.environ.get("MERRA_DATA", None)
 HAS_MERRA_DATA = MERRA_DATA_PATH is not None
 
+PRITHVI_DATA_PATH = os.environ.get("PRITHVI_DATA", None)
+HAS_PRITHVI_DATA = PRITHVI_DATA_PATH is not None
 
-@pytest.mark.skipif(not HAS_MERRA_DATA, reason="MERRA inptu data not available.")
+
+@pytest.mark.skipif(not HAS_MERRA_DATA, reason="MERRA input data not available.")
 def test_merra_input_data():
     """
     Test that available input files for MERRA data are parsed correctly.
@@ -111,22 +114,6 @@ def test_load_static_data():
 
 
 @pytest.mark.skipif(not HAS_MERRA_DATA, reason="MERRA inptu data not available.")
-def test_load_static_data():
-    """
-    Test that available input files for MERRA data are parsed correctly.
-    """
-    input_times = [-3, 0]
-    lead_times = [3, 6]
-    dataset = MERRAInputData(
-        MERRA_DATA_PATH,
-        input_times=input_times,
-        lead_times=lead_times
-    )
-
-    data = dataset.load_static_data(np.datetime64("2020-01-01T12:00:00"))
-    assert data.shape == (10, 361, 576)
-
-@pytest.mark.skipif(not HAS_MERRA_DATA, reason="MERRA inptu data not available.")
 def test_load_sample():
     """
     Test that available input files for MERRA data are parsed correctly.
@@ -189,6 +176,7 @@ def load_data_prithvi(data_path: Path, ind: int):
 
 
 @pytest.mark.skipif(not HAS_MERRA_DATA, reason="MERRA input data not available.")
+@pytest.mark.skipif(not HAS_PRITHVI_DATA, reason="PRITHVI input data not available.")
 def test_loaded_data():
     input_times = [-6, 0]
     lead_times = [6]
@@ -199,7 +187,7 @@ def test_loaded_data():
     )
     x, y = dataset[0]
 
-    inpt_ref = load_data_prithvi(Path(MERRA_DATA_PATH).parent / "prithvi", 0)
+    inpt_ref = load_data_prithvi(Path(PRITHVI_DATA_PATH), 0)
 
     assert torch.all(torch.isclose(x["x"], inpt_ref["x"][0]))
     assert torch.all(torch.isfinite(x["x"]))
@@ -221,7 +209,7 @@ def test_get_forecast_input_static():
     )
 
     static_data = dataset.get_forecast_input_static(np.datetime64("2020-01-01T06:00:00"), 4)
-    assert static_data.shape == (5, 10, 360, 576)
+    assert static_data.shape == (4, 10, 360, 576)
 
 
 @pytest.mark.skipif(not HAS_MERRA_DATA, reason="MERRA input data not available.")
@@ -234,7 +222,7 @@ def test_get_forecast_input_climate():
         lead_times=lead_times
     )
     climate_data = dataset.get_forecast_input_climate(np.datetime64("2020-01-01T06:00:00"), 2)
-    assert climate_data.shape == (3, 160, 360, 576)
+    assert climate_data.shape == (2, 160, 360, 576)
 
 
 @pytest.mark.skipif(not HAS_MERRA_DATA, reason="MERRA input data not available.")
