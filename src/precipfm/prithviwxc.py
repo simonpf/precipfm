@@ -100,7 +100,8 @@ def load_model(
     kwargs["residual"] = "climate"
     kwargs["masking_mode"] = "local"
     kwargs["decoder_shifting"] = True
-    kwargs["mask_ratio_inputs"] = 0.99
+    kwargs["mask_ratio_inputs"] = 0.0
+    kwargs["mask_ratio_targets"] = 0.0
 
     model = PrithviWxC(**kwargs)
 
