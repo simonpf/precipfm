@@ -188,7 +188,7 @@ def extract_observations_day(
     time = datetime(year, month, day, hour=12)
     recs = patmosx.find_files(time)
     LOGGER.info(
-        f"Found {len(recs)} for {year:04}/{month:02}/{day:02}."
+        f"Found {len(recs)} files for {year:04}/{month:02}/{day:02}."
     )
     for rec in recs:
         try:
