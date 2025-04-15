@@ -97,8 +97,12 @@ def download_dynamic(year: int, month: int, day: int, output_path: Path) -> None
         lat="latitude",
         lon="longitude"
     )
+    data = data.coarsen({"longitude": 2}).mean()
+    data_n = data[{"latitude": 720}]
+    data = data[{"latitude": slice(0, -1)}].coarsen({"latitude": 2}).mean()
+    data = xr.concat((data, data_n), "latitude")
 
-    output_path = Path(output_path) / f"{year:04}/{month:02}/{day:02}"
+    output_path = Path(output_path) / "dynamic" / f"{year:04}/{month:02}/{day:02}"
     output_path.mkdir(exist_ok=True, parents=True)
 
     encoding = {name: {"zlib": True} for name in data}
