@@ -15,6 +15,10 @@ from typing import Dict, List, Optional, Tuple, Union
 
 import numpy as np
 from pansat.time import to_datetime64, to_datetime
+from PrithviWxC.dataloaders.merra2 import (
+    input_scalers,
+    static_input_scalers,
+)
 import torch
 from torch import nn
 from torch.utils.data import Dataset
@@ -23,6 +27,7 @@ import xarray as xr
 import yaml
 
 from precipfm.merra import (
+    LEVELS,
     STATIC_SURFACE_VARS,
     SURFACE_VARS,
     VERTICAL_VARS
@@ -342,7 +347,8 @@ class MERRAInputData(Dataset):
         """
         rel_time = time - time.astype("datetime64[Y]").astype(time.dtype)
         rel_time = np.datetime64("1980-01-01T00:00:00") + rel_time
-        static_data = load_static_data(self.root_dir).interp(
+        static_data = load_static_data(self.root_dir)
+        static_data = static_data.interp(
             time=rel_time.astype("datetime64[ns]"),
             method="nearest",
             kwargs={"fill_value": "extrapolate"}
@@ -455,111 +461,6 @@ class GEOSInputData(MERRAInputData):
         return times, files
 
 
-    def load_dynamic_data(self, path: Path) -> torch.Tensor:
-        """
-        Load all dynamic data from a given input file and return the data.
-
-        Args:
-            path: A path object pointing to the file to load.
-
-        Return:
-            A torch.Tensor containing all dynamic data for the given input file in the shape
-            [var + levels (channels), lat, lon].
-        """
-        all_data = []
-        with xr.open_dataset(self.root_dir / path) as data:
-            for var in SURFACE_VARS:
-                all_data.append(data[var].data[None].astype(np.float32))
-            for var in VERTICAL_VARS:
-                all_data.append(data[var].astype(np.float32))
-        all_data = torch.tensor(np.concatenate(all_data, axis=0))
-        return all_data
-
-    def load_static_data(self, time: np.datetime64) -> torch.Tensor:
-        """
-        Load all dynamic data from a given input file and return the data.
-
-        Args:
-            path: A path object pointing to the file to load.
-
-        Return:
-            A torch.Tensor containing all dynamic data for the given
-        """
-        rel_time = time - time.astype("datetime64[Y]").astype(time.dtype)
-        rel_time = np.datetime64("1980-01-01T00:00:00") + rel_time
-        static_data = load_static_data(self.root_dir).interp(
-            time=rel_time,
-            method="nearest",
-            kwargs={"fill_value": "extrapolate"}
-        )
-        lons = static_data.longitude.data
-        lats = static_data.latitude.data
-
-        if self._pos_sig is None:
-            self._pos_sig = get_position_signal(lons, lats, kind="fourier")
-        pos_sig = torch.tensor(self._pos_sig)
-
-        n_time = 4
-        n_pos = pos_sig.shape[0]
-        n_lon = lons.size
-        n_lat = lats.size
-        n_static_vars = len(STATIC_SURFACE_VARS)
-
-        data = torch.zeros((n_time + n_pos + n_static_vars, n_lat, n_lon))
-
-        doy = time - time.astype("datetime64[Y]").astype(time.dtype)
-        doy = doy.astype("timedelta64[D]").astype(int) + 1
-        assert 0 <= doy <= 366
-
-        hod = time - time.astype("datetime64[D]").astype(time.dtype)
-        hod = hod.astype("timedelta64[h]").astype(int)
-        assert 0 <= hod <= 24
-
-        data[0:n_pos] = pos_sig
-        data[n_pos + 0] = np.cos(2 * np.pi * doy / 366)
-        data[n_pos + 1] = np.sin(2 * np.pi * doy / 366)
-        data[n_pos + 2] = np.cos(2 * np.pi * hod / 24)
-        data[n_pos + 3] = np.sin(2 * np.pi * hod / 24)
-
-        for ind, var in enumerate(STATIC_SURFACE_VARS):
-            data[n_pos + 4 + ind] = torch.tensor(static_data[var].data)
-
-        return data
-
-    def __len__(self):
-        return len(self.input_indices)
-
-    def __getitem__(self, ind: int) -> Tuple[torch.Tensor, torch.Tensor]:
-        """
-        Load and return a single data point from the dataset.
-        """
-        input_files = [self.input_files[ind] for ind in self.input_indices[ind]]
-        input_times = [self.times[ind] for ind in self.input_indices[ind]]
-        output_files = [self.input_files[ind] for ind in self.output_indices[ind]]
-        output_times = [self.times[ind] for ind in self.output_indices[ind]]
-
-        dynamic_in = [self.load_dynamic_data(path) for path in input_files]
-        static_in = self.load_static_data(input_times[-1])
-
-        input_time = (input_times[1] - input_times[0]).astype("timedelta64[h]").astype(np.float32)
-        lead_time = (output_times[0] - input_times[1]).astype("timedelta64[h]").astype(np.float32)
-
-        dynamic_out = [self.load_dynamic_data(path) for path in output_files]
-        climate = [load_climatology(self.root_dir, time) for time in output_times]
-
-        # Remove one row along lat dimension.
-        pad = partial(nn.functional.pad, pad=((0, 0, 0, -1)))
-
-        x = {
-            "x": pad(torch.stack(dynamic_in, 0)),
-            "static": pad(static_in),
-            "climate": pad(torch.tensor(climate[0])),
-            "input_time": torch.tensor(input_time),
-            "lead_time": torch.tensor(lead_time)
-        }
-        y = pad(torch.tensor(dynamic_out[0]))
-
-        return x, y
 
 
 class PrecipDiagnosisDataset(MERRAInputData):
@@ -571,7 +472,8 @@ class PrecipDiagnosisDataset(MERRAInputData):
             self,
             root_dir: Union[Path, str],
             scene_size: int = 128,
-            validation: bool = False
+            validation: bool = False,
+            auxiliary_path: Optional[Union[str, Path]] = None
     ):
         """
         Args:
@@ -582,12 +484,36 @@ class PrecipDiagnosisDataset(MERRAInputData):
         self.root_dir = Path(root_dir)
         self.scene_size = scene_size
         self.validation = validation
+        self._pos_sig = None
 
         self.input_times, self.input_files = self.find_merra_files(self.root_dir)
         self.output_times, self.output_files = self.find_precip_files(self.root_dir)
 
         self.input_indices, self.output_indices = self.calculate_valid_samples()
         self.init_rng()
+
+        if auxiliary_path is not None:
+            auxiliary_path = Path(auxiliary_path)
+            in_mu, in_sig = input_scalers(
+                SURFACE_VARS,
+                VERTICAL_VARS,
+                LEVELS,
+                auxiliary_path / "musigma_surface.nc",
+                auxiliary_path / "musigma_vertical.nc",
+            )
+            static_mu, static_sig = static_input_scalers(
+                auxiliary_path / "musigma_surface.nc",
+                STATIC_SURFACE_VARS,
+            )
+            self.mu_dynamic = in_mu
+            self.sigma_dynamic = in_sig
+            self.mu_static = static_mu
+            self.sigma_static = static_sig
+        else:
+            self.mu_dynamic = None
+            self.sigma_dynamic = None
+            self.mu_static = None
+            self.sigma_static = None
 
     def init_rng(self, w_id=0):
         """
@@ -712,12 +638,25 @@ class PrecipDiagnosisDataset(MERRAInputData):
 
             input_ind = self.input_indices[ind]
             dynamic_in = self.load_dynamic_data(self.input_files[input_ind], slcs=slcs)
+            static_in = self.load_static_data(self.input_times[input_ind])[..., row_slice, col_slice]
+
+            if self.mu_dynamic is not None:
+                dynamic_in = (dynamic_in - self.mu_dynamic[..., None, None]) / self.sigma_dynamic[..., None, None]
+                static_in = torch.cat(
+                    (static_in[:2], (static_in[2:] - self.mu_static[3:, None, None]) / self.sigma_static[3:, None, None]),
+                    0
+                )
+                dynamic_in += 1e-2 * self.rng.normal(size=dynamic_in.shape)
+                dynamic_in = dynamic_in.to(dtype=torch.float32)
+                static_in += 1e-2 * self.rng.normal(size=static_in.shape)
+                static_in = static_in.to(dtype=torch.float32)
 
             output_ind = self.output_indices[ind]
             with xr.open_dataset(self.root_dir / self.output_files[output_ind]) as precip_data:
                 precip_data = precip_data.surface_precip[slcs].data
 
-            return dynamic_in, precip_data
+
+            return {"dynamic": dynamic_in, "static": static_in}, precip_data
 
         except Exception as exc:
             raise exc
