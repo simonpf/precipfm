@@ -96,6 +96,8 @@ def load_climatology(root_dir: Path, time: np.datetime64) -> np.ndarray:
     date = time.astype("datetime64[s]").item()
     year = date.year
     doy = (date - datetime(year=year, month=1, day=1)).days + 1
+    # No climatology for leap years :(.
+    doy = min(doy, 365)
     hod = date.hour
 
     sfc_file = root_dir / "climatology" / f"climate_surface_doy{doy:03}_hour{hod:02}.nc"
@@ -1058,6 +1060,7 @@ class ObservationLoader(Dataset):
         observations = torch.nan * torch.zeros(self.n_tiles + (self.observation_layers, 1) + self.tile_size)
         meta_data = torch.zeros(self.n_tiles + (self.observation_layers, 8) + self.tile_size)
 
+        print(path, path.exists())
         if not path.exists():
             LOGGER.warning(
                 "No observations for time %s.", time
@@ -1260,4 +1263,59 @@ class GEOSInputLoader(MERRAInputData):
             "input_time": input_time,
             "climate": climate
         }
+        return x
+
+
+class GEOSObservationInputLoader(GEOSInputLoader):
+    """
+    A PyTorch Dataset for loading 3-hourly GEOS analysis data.
+    """
+    def __init__(
+            self,
+            root_dir: Union[Path, str],
+            time_step: int = 3,
+            n_steps: int = 8,
+            climate: bool = True
+    ):
+        """
+        Args:
+            root_dir (str): Root directory containing year/month/day folders.
+            time_step: The forecast time step.
+            n_steps: The number of forecast steps to perform.
+        """
+        super().__init__(
+            root_dir=root_dir,
+            time_step=time_step,
+            n_steps=n_steps,
+            climate=climate
+        )
+        self.obs_loader = ObservationLoader(
+            Path(root_dir).parent / "obs",
+            n_tiles=(12, 18),
+            tile_size=(30, 32),
+            observation_layers=32
+        )
+
+
+    def get_forecast_input(self, init_time: np.datetime64) -> Dict[str, torch.Tensor]:
+        """
+        Get forecast input data to perform a continuous forecast.
+        """
+        x = super().get_forecast_input(init_time)
+        input_times = [init_time + np.timedelta64(t_i * self.time_step, "h") for t_i in [-1, 0]]
+        obs = []
+        meta = []
+        for time_ind, time in enumerate(input_times):
+            obs_t, meta_t = self.obs_loader.load_observations(time, offset=len(input_times) - time_ind - 1)
+            obs.append(obs_t)
+            meta.append(meta_t)
+        obs = torch.flip(torch.stack(obs, 0), (1, -2))
+        obs_mask = torch.isnan(obs)
+        obs = torch.nan_to_num(obs, nan=-1.5)
+        meta = torch.stack(meta, 0)
+
+        x["obs"] = obs[None].repeat_interleave(self.n_steps, 0)
+        x["obs_mask"] = obs_mask[None].repeat_interleave(self.n_steps, 0)
+        x["obs_meta"] = meta[None].repeat_interleave(self.n_steps, 0)
+
         return x
