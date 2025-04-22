@@ -326,6 +326,10 @@ class MERRAInputData(Dataset):
             A torch.Tensor containing all dynamic data for the given input file in the shape
             [var + levels (channels), lat, lon].
         """
+        LOGGER.debug(
+            "Loading dynamic input from file %s.",
+            path
+        )
         all_data = []
         if slcs is None:
             slcs = {}
@@ -347,6 +351,10 @@ class MERRAInputData(Dataset):
         Return:
             A torch.Tensor containing all dynamic data for the given
         """
+        LOGGER.debug(
+            "Loading static input from for time %s.",
+            time
+        )
         rel_time = time - time.astype("datetime64[Y]").astype(time.dtype)
         rel_time = np.datetime64("1980-01-01T00:00:00") + rel_time
         static_data = load_static_data(self.root_dir)
@@ -943,6 +951,7 @@ class DirectPrecipForecastDataset(PrecipForecastDataset):
                 x["climate"] = pad(torch.tensor(climate))
 
             with xr.load_dataset(self.root_dir / output_file) as data:
+                LOGGER.debug("Loading precip data from %s.", output_file)
                 precip = torch.tensor(data.surface_precip.data.astype(np.float32))
 
             return x, precip
@@ -1239,10 +1248,10 @@ class GEOSInputLoader(MERRAInputData):
 
         dynamic_in = []
         for input_time in input_times:
-            ind = np.searchsorted(self.input_times, input_times[-1])
+            ind = np.searchsorted(self.input_times, input_time)
             dynamic_in.append(self.load_dynamic_data(self.input_files[ind]))
 
-        static_time = self.input_times[-1]
+        static_time = input_times[-1]
         static_in = self.load_static_data(static_time)
 
         pad = partial(nn.functional.pad, pad=((0, 0, 0, -1)))
@@ -1264,6 +1273,18 @@ class GEOSInputLoader(MERRAInputData):
             "climate": climate
         }
         return x
+
+    def get_batched_forecast_input(self, init_time: np.datetime64, batch_size) -> Dict[str, torch.Tensor]:
+        """
+        Get forecast input data to perform a continuous forecast.
+        """
+        x = self.get_forecast_input(init_time)
+        batch_start = 0
+        n_samples = x["x"].shape[0]
+        while batch_start < n_samples:
+            batch_end = batch_start + batch_size
+            yield {name: tnsr[batch_start:batch_end] for name, tnsr in x.items()}
+            batch_start = batch_end
 
 
 class GEOSObservationInputLoader(GEOSInputLoader):
