@@ -129,6 +129,7 @@ class MERRAInputData(Dataset):
             root_dir: Union[Path, str],
             input_times: Optional[List[int]] = None,
             lead_times: Optional[List[int]] = None,
+            climate: bool = True
     ):
 
         """
@@ -141,6 +142,8 @@ class MERRAInputData(Dataset):
             lead_times = [3]
         self.root_dir = Path(root_dir)
         self.times, self.input_files = self.find_files(self.root_dir)
+        self.time_step = lead_times[0]
+        self.climate = climate
 
         self._pos_sig = None
         self.input_times = input_times
@@ -200,7 +203,7 @@ class MERRAInputData(Dataset):
         Return:
             A torch tensor containing the model input data.
         """
-        input_times = [initialization_time + np.timedelta64(t_i, "h") for t_i in self.input_times]
+        input_times = [initialization_time + np.timedelta64(t_i, "h") for t_i in self.times]
         for input_time in input_times:
             if not input_time in self.times:
                 raise ValueError(
@@ -435,6 +438,63 @@ class MERRAInputData(Dataset):
         y = pad(torch.tensor(dynamic_out[0]))
 
         return x, y
+
+    def get_forecast_input(self, init_time: np.datetime64, n_steps: int) -> Dict[str, torch.Tensor]:
+        """
+        Get forecast input data to perform a continuous forecast.
+        """
+        input_times = [init_time + np.timedelta64(t_i * self.time_step, "h") for t_i in [-1, 0]]
+        for input_time in input_times:
+            if input_time not in self.times:
+                raise ValueError(
+                    "Required input data for t=%s not available.",
+                    input_time
+                )
+
+        dynamic_in = []
+        for input_time in input_times:
+            ind = np.searchsorted(self.times, input_times[-1])
+            dynamic_in.append(self.load_dynamic_data(self.input_files[ind]))
+
+        static_time = self.times[-1]
+        static_in = self.load_static_data(static_time)
+
+        pad = partial(nn.functional.pad, pad=((0, 0, 0, -1)))
+        dynamic_in = pad(torch.stack(dynamic_in, 0))[None].repeat(n_steps, 1, 1, 1, 1)
+        static_in = pad(static_in)[None].repeat(n_steps, 1, 1, 1)
+        input_time = self.input_times[0] * torch.ones(n_steps)
+        lead_time = self.time_step * torch.arange(1, n_steps + 1).to(dtype=torch.float32)
+
+        x = {
+            "x": dynamic_in,
+            "static": static_in,
+            "lead_time": lead_time,
+            "input_time": input_time,
+        }
+
+        if self.climate:
+            output_times = [init_time + step * np.timedelta64(self.time_step, "h") for step in range(1, n_steps + 1)]
+            climate = [torch.tensor(load_climatology(self.root_dir, time)) for time in output_times]
+            climate = pad(torch.stack(climate))
+            x["climate"] = climate
+
+        return x
+
+    def get_batched_forecast_input(
+            self,
+            init_time: np.datetime64,
+            n_steps: int,
+            batch_size: int) -> Dict[str, torch.Tensor]:
+        """
+        Get forecast input data to perform a continuous forecast.
+        """
+        x = self.get_forecast_input(init_time, n_steps=n_steps)
+        batch_start = 0
+        n_samples = x["x"].shape[0]
+        while batch_start < n_samples:
+            batch_end = batch_start + batch_size
+            yield {name: tnsr[batch_start:batch_end] for name, tnsr in x.items()}
+            batch_start = batch_end
 
 
 class GEOSInputData(MERRAInputData):
@@ -850,18 +910,22 @@ class DirectPrecipForecastDataset(PrecipForecastDataset):
             root_dir: Union[Path, str],
             time_step: int = 3,
             max_steps: int = 24,
-            climate: bool = True
+            climate: bool = True,
+            augment: bool = True
     ):
         """
         Args:
             root_dir (str): Root directory containing year/month/day folders.
             time_step: The forecast time step.
             max_steps: The maximum number of timesteps to forecast precipitation.
+            augment: Whether or not to augment the training data using random meridioanl flipping and
+                 zonal rolls.
         """
         self.input_time = -time_step
         self.time_step = time_step
         self.max_steps = max_steps
         self.climate = climate
+        self.augment = augment
 
         self.root_dir = Path(root_dir)
         self.input_times, self.input_files = self.find_merra_files(self.root_dir)
@@ -954,6 +1018,21 @@ class DirectPrecipForecastDataset(PrecipForecastDataset):
                 LOGGER.debug("Loading precip data from %s.", output_file)
                 precip = torch.tensor(data.surface_precip.data.astype(np.float32))
 
+            coords = x["static"][:2]
+
+            if self.augment:
+                roll = self.rng.integers(0, 576 // 32) * 32
+                for var in ["x", "static", "climate"]:
+                    x[var] = x[var].roll(roll, dims=-1)
+
+
+                flip = self.rng.random() > 0.5
+                if flip:
+                    for var in ["x", "static", "climate"]:
+                        x[var] = x[var].flip(-2)
+
+                x["static"][:2] = coords
+
             return x, precip
 
         except Exception as exc:
@@ -965,42 +1044,6 @@ class DirectPrecipForecastDataset(PrecipForecastDataset):
             )
             new_ind = np.random.randint(0, len(self))
             return self[new_ind]
-
-    def get_forecast_input(self, init_time: np.datetime64) -> Dict[str, torch.Tensor]:
-        """
-        Get forecast input data to perform a continuous forecast.
-        """
-        input_times = [init_time + np.timedelta64(t_i * self.time_step, "h") for t_i in [-1, 0]]
-        for input_time in input_times:
-            if input_time not in self.input_times:
-                raise ValueError(
-                    "Required input data for t=%s not available.",
-                    input_time
-                )
-
-        dynamic_in = []
-        for input_time in input_times:
-            ind = np.searchsorted(self.input_times, input_times[-1])
-            dynamic_in.append(self.load_dynamic_data(self.input_files[ind]))
-
-        static_time = self.input_times[-1]
-        static_in = self.load_static_data(static_time)
-
-        pad = partial(nn.functional.pad, pad=((0, 0, 0, -1)))
-        dynamic_in = pad(torch.stack(dynamic_in, 0))[None].repeat(self.max_steps, 1, 1, 1, 1)
-        static_in = pad(static_in)[None].repeat(self.max_steps, 1, 1, 1)
-        input_time = self.input_time * torch.ones(self.max_steps)
-        lead_time = self.time_step * torch.arange(1, self.max_steps + 1).to(dtype=torch.float32)
-
-
-        x = {
-            "x": dynamic_in,
-            "static": static_in,
-            "lead_time": lead_time,
-            "input_time": input_time,
-        }
-        return x
-
 
 
 class ObservationLoader(Dataset):
@@ -1274,17 +1317,6 @@ class GEOSInputLoader(MERRAInputData):
         }
         return x
 
-    def get_batched_forecast_input(self, init_time: np.datetime64, batch_size) -> Dict[str, torch.Tensor]:
-        """
-        Get forecast input data to perform a continuous forecast.
-        """
-        x = self.get_forecast_input(init_time)
-        batch_start = 0
-        n_samples = x["x"].shape[0]
-        while batch_start < n_samples:
-            batch_end = batch_start + batch_size
-            yield {name: tnsr[batch_start:batch_end] for name, tnsr in x.items()}
-            batch_start = batch_end
 
 
 class GEOSObservationInputLoader(GEOSInputLoader):
