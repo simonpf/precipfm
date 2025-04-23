@@ -911,7 +911,8 @@ class DirectPrecipForecastDataset(PrecipForecastDataset):
             time_step: int = 3,
             max_steps: int = 24,
             climate: bool = True,
-            augment: bool = True
+            augment: bool = True,
+            sampling_rate: float = 1.0
     ):
         """
         Args:
@@ -926,6 +927,7 @@ class DirectPrecipForecastDataset(PrecipForecastDataset):
         self.max_steps = max_steps
         self.climate = climate
         self.augment = augment
+        self.sampling_rate = sampling_rate
 
         self.root_dir = Path(root_dir)
         self.input_times, self.input_files = self.find_merra_files(self.root_dir)
@@ -975,12 +977,19 @@ class DirectPrecipForecastDataset(PrecipForecastDataset):
         return np.array(input_indices), np.array(output_indices)
 
     def __len__(self):
-        return len(self.input_indices)
+        return trunc(len(self.input_indices) / self.sampling_rate)
 
     def __getitem__(self, ind: int) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Load and return a single data point from the dataset.
         """
+        lower = trunc(ind / self.sampling_rate)
+        upper = min(trunc((ind + 1) / self.sampling_rate), len(self.input_indices) - 1)
+        if lower < upper:
+            ind = self.rng.integers(lower, upper)
+        else:
+            ind = lower
+
         try:
             input_files = [self.input_files[ind] for ind in self.input_indices[ind]]
             input_times = [self.input_times[ind] for ind in self.input_indices[ind]]
@@ -1107,12 +1116,11 @@ class ObservationLoader(Dataset):
         Load observations for a given time.
         """
         date = to_datetime(time)
-        path = self.observation_path / date.strftime("%Y/%m/%d/%H/")
+        path = self.observation_path / date.strftime("%Y/%m/%d/obs_%Y%m%d%H%M%S.nc")
 
         observations = torch.nan * torch.zeros(self.n_tiles + (self.observation_layers, 1) + self.tile_size)
-        meta_data = torch.zeros(self.n_tiles + (self.observation_layers, 8) + self.tile_size)
+        meta_data = torch.nan * torch.zeros(self.n_tiles + (self.observation_layers, 8) + self.tile_size)
 
-        print(path, path.exists())
         if not path.exists():
             LOGGER.warning(
                 "No observations for time %s.", time
@@ -1121,43 +1129,35 @@ class ObservationLoader(Dataset):
 
         layer_ind = np.zeros(self.n_tiles, dtype=np.int64)
 
-        files = self.find_files(path)
+        print("OBS :: ", path)
+        data = xr.load_dataset(path)
 
-        for path in files:
-            data = xr.load_dataset(path)
-            row_inds = data.tiles_meridional.data
-            col_inds = data.tiles_zonal.data
-            l_inds = layer_ind[row_inds, col_inds]
+        for row_ind in range(self.n_tiles[0]):
+            for col_ind in range(self.n_tiles[1]):
 
-            obs_name = data.attrs["obs_name"]
-            min_val, max_val = self.get_minmax(obs_name)
-            obs = torch.tensor(data.observations.data.astype(np.float32))[:, None]
-            obs_n = -1.0 +  2.0 * (obs - min_val) / (max_val - min_val)
-            observations[row_inds, col_inds, l_inds] = obs_n.to(torch.float32)
+                obs_name = f"observations_{row_ind:02}_{col_ind:02}"
+                if obs_name not in data:
+                    continue
 
-            if offset is None:
-                offset = 0.0
+                obs = torch.tensor(data[obs_name].data)
+                inds = np.random.permutation(obs.shape[0])
+                tiles = min(obs.shape[0], self.observation_layers)
+                observations[row_ind, col_ind, :tiles, 0] = obs[inds[:tiles]]
 
-            # Load meta data
-            if "observation_relative_time" in data:
-                rel_time = data.observation_relative_time.data / (self.time_step * 3600) + offset
-                meta_data[row_inds, col_inds, l_inds, 0] = torch.tensor(rel_time)
-            else:
-                rel_time = data.attrs["observation_relative_time"] / (self.time_step * 3600) + offset
-                meta_data[row_inds, col_inds, l_inds, 0] = rel_time
+                freq = np.log10(data[f"frequency_{row_ind:02}_{col_ind:02}"].data[inds[:tiles]])
+                freq = -1.0 + 2.0 * (freq - np.log10(self.freq_max)) / (np.log10(self.freq_max) - np.log10(self.freq_min))
+                offs = data[f"offset_{row_ind:02}_{col_ind:02}"].data[inds[:tiles]]
+                pol = torch.nn.functional.one_hot(
+                    torch.tensor(data[f"polarization_{row_ind:02}_{col_ind:02}"].data[inds[:tiles]]).to(dtype=torch.int64),
+                    num_classes=5
+                )
 
+                time_offset = data[f"time_offset_{row_ind:02}_{col_ind:02}"].data[inds[:tiles]] / 180.0
 
-            freq_max = np.log10(self.freq_max)
-            freq_min = np.log10(self.freq_min)
-            freq = np.log10(data.attrs["frequency"])
-            meta_data[row_inds, col_inds, l_inds, 1] = 2.0 * (freq - freq_min)  / (freq_max - freq_min)
-            meta_data[row_inds, col_inds, l_inds, 2] = 0.0
-            pol = POLARIZATIONS.get(data.attrs["polarization"].upper(), 0)
-            meta_data[row_inds, col_inds, l_inds, 3 + pol] = 1.0
-
-            layer_ind[row_inds, col_inds] += 1
-            if self.observation_layers <= layer_ind.max() :
-                break
+                meta_data[row_ind, col_ind, :tiles, 0] = torch.tensor(freq)[..., None, None]
+                meta_data[row_ind, col_ind, :tiles, 1] = torch.tensor(offs)[..., None, None]
+                meta_data[row_ind, col_ind, :tiles, 2] = torch.tensor(time_offset)
+                meta_data[row_ind, col_ind, :tiles, 3:] = pol[..., None, None]
 
         return observations, meta_data
 
