@@ -977,7 +977,7 @@ class DirectPrecipForecastDataset(PrecipForecastDataset):
         return np.array(input_indices), np.array(output_indices)
 
     def __len__(self):
-        return trunc(len(self.input_indices) / self.sampling_rate)
+        return trunc(len(self.input_indices) * self.sampling_rate)
 
     def __getitem__(self, ind: int) -> Tuple[torch.Tensor, torch.Tensor]:
         """
