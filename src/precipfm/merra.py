@@ -10,7 +10,6 @@ import logging
 from pathlib import Path
 from typing import Union
 
-
 import numpy as np
 from pansat import FileRecord, Geometry, TimeRange
 from pansat.products.reanalysis.merra import MERRA2, MERRA2Constant

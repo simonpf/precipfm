@@ -10,7 +10,10 @@ from pathlib import Path
 import numpy as np
 from scipy.stats import binned_statistic_2d
 from pansat import TimeRange
-from pansat.products.satellite.gpm import l3b_hhr_3imerg_ms_mrg_07b
+from pansat.products.satellite.gpm import (
+    l3b_hhr_3imerg_ms_mrg_07b,
+    l3b_hhre_3imerg_ms_mrg_07b
+)
 from pansat.time import to_datetime
 import xarray as xr
 
@@ -32,7 +35,10 @@ def download(year: int, month: int, day: int, output_path: Path) -> None:
     start_time = datetime(year, month, day, minute=1)
     end_time = start_time + timedelta(hours=23, minutes=58)
     time_range = TimeRange(start_time, end_time)
+
     recs = l3b_hhr_3imerg_ms_mrg_07b.get(time_range)
+    if len(recs) == 0:
+        recs = l3b_hhre_3imerg_ms_mrg_07b.get(time_range)
 
     precip_fields = []
     time = []

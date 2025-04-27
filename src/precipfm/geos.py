@@ -148,7 +148,7 @@ def download_geos_forecast(year: int, month: int, day: int, output_path: Path) -
             "Extracting forecasts for initialization time %s.",
             init_time
         )
-        geos_recs = tavg1_2d_flx_nx_fc.get(
+        geos_recs = tavg1_2d_flx_nx_fc.find_files(
             TimeRange(init_time + np.timedelta64(3, "h"))
         )
 
@@ -161,12 +161,26 @@ def download_geos_forecast(year: int, month: int, day: int, output_path: Path) -
 
         geos_data = []
         for rec in geos_recs:
+            try:
+                rec = rec.get()
+            except Exception as exc:
+                LOGGER.warning(
+                    "Error downloading file record %s", rec
+                )
+                continue
             with xr.open_dataset(rec.local_path) as data:
-                data = data[["PRECTOT"]].compute()
+                data = data[["PRECTOT"]].compute().rename({
+                    "lon": "longitude",
+                    "lat": "latitude"
+                })
+                data = data.coarsen({"longitude": 2}).mean()
+                data_n = data[{"latitude": 720}]
+                data = data[{"latitude": slice(0, -1)}].coarsen({"latitude": 2}).mean()
                 geos_data.append(data)
 
         geos_data = xr.concat(geos_data, dim="time")
         geos_data = geos_data.sortby("time")
+        geos_data = geos_data.resample(time="3h").mean()
 
         init_time = to_datetime(init_time)
         filename = init_time.strftime("geos_forecast_%Y%m%d_%H.nc")
