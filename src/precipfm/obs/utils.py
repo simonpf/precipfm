@@ -15,6 +15,22 @@ import xarray as xr
 import yaml
 
 
+POLARIZATIONS = {
+    "NONE": 0,
+    "H": 1,
+    "V": 2,
+    "QH": 3,
+    "QV": 4
+}
+
+
+def encode_polarization(pol: str) -> int:
+    """
+    Encode polarization as integer.
+    """
+    return POLARIZATIONS[pol.upper()]
+
+
 def update_tile_list(
         output_folder: Path,
         n_tiles: Tuple[int, int],
@@ -171,11 +187,15 @@ def get_output_path(time: np.datetime64):
         A pathlib.Path object pointing to the in which to store the output file.
     """
     date = to_datetime(time)
-    path = Path(date.strftime("%Y/%m/%d/%H"))
+    path = Path(date.strftime("%Y/%m/%d/"))
     return path
 
 
-def track_stats(base_path: Path, variable_name: str, observations: np.ndarray):
+def track_stats(
+        base_path: Path,
+        variable_name: str,
+        observations: np.ndarray
+) -> int:
     """
     Track stats for a given observation source.
 
@@ -183,6 +203,9 @@ def track_stats(base_path: Path, variable_name: str, observations: np.ndarray):
         base_path: The base path to which observation tiles are extracted.
         variable_name: The name of the variable being tracked.
         observations: The observation data to track.
+
+    Return:
+        A variable that can be used to load the stats for the tracked variable.
     """
     base_path = Path(base_path)
     stats_file = base_path / "stats.nc"
@@ -196,17 +219,83 @@ def track_stats(base_path: Path, variable_name: str, observations: np.ndarray):
         else:
             data = xr.load_dataset(stats_file)
 
-        if variable_name not in data:
+        all_vars = data.attrs.get("variables", "").split(",")
+        n_vars = len(all_vars)
+
+        if variable_name not in all_vars:
             data[variable_name + "_sum"] = obs.sum()
             data[variable_name + "_squared_sum"] = (obs ** 2).sum()
             data[variable_name + "_counts"] = obs.size
             data[variable_name + "_min"] = obs.min()
             data[variable_name + "_max"] = obs.max()
+            var_ind = n_vars
+            all_vars.append(variable_name)
         else:
-            data[variable_name + "_sum"] += obs.sum()
-            data[variable_name + "_squared_sum"] += (obs ** 2).sum()
-            data[variable_name + "_counts"] += obs.size
-            data[variable_name + "_min"] = min(data[variable_name + "_min"], obs.min())
-            data[variable_name + "_max"] = max(data[variable_name + "_max"], obs.max())
+            try:
+                data[variable_name + "_sum"] += obs.sum()
+                data[variable_name + "_squared_sum"] += (obs ** 2).sum()
+                data[variable_name + "_counts"] += obs.size
+                data[variable_name + "_min"] = min(data[variable_name + "_min"], obs.min())
+                data[variable_name + "_max"] = max(data[variable_name + "_max"], obs.max())
+            except Exception:
+                data[variable_name + "_sum"] = obs.sum()
+                data[variable_name + "_squared_sum"] = (obs ** 2).sum()
+                data[variable_name + "_counts"] = obs.size
+                data[variable_name + "_min"] = obs.min()
+                data[variable_name + "_max"] = obs.max()
+                var_ind = all_vars.index(variable_name)
+            finally:
+                var_ind = n_vars
 
+        data.attrs["variables"] = ",".join(all_vars)
         data.to_netcdf(stats_file)
+
+        return var_ind
+
+
+def split_tiles(data: xr.Dataset) -> xr.Dataset:
+    """
+    Split tiles into difference variables.
+    """
+    tiles_zonal = data.tiles_zonal
+    tiles_meridional = data.tiles_meridional
+
+    split = {}
+    for tile_zonal, tile_meridional in zip(tiles_zonal, tiles_meridional):
+        dim_name = f"tiles_{tile_meridional:02}_{tile_zonal:02}"
+        tile_mask = (data.tiles_zonal == tile_zonal) * (data.tiles_meridional == tile_meridional)
+        for var in ["observations", "frequency", "wavelength", "offset", "polarization", "obs_id", "time_offset"]:
+            var_name = f"{var}_{tile_meridional:02}_{tile_zonal:02}"
+            tiles = data[var][{"tiles": tile_mask}].rename(tiles=dim_name)
+
+            if tiles.ndim == 3:
+                tiles = tiles.transpose(dim_name, "lat_tile", "lon_tile")
+                split[var_name] = ((dim_name, "lat_tile", "lon_tile"), tiles.data)
+            else:
+                split[var_name] = ((dim_name,), tiles.data)
+
+
+    return xr.Dataset(split)
+
+
+def combine_tiles(data: xr.Dataset, new_data: xr.Dataset) -> xr.Dataset:
+    """
+    Split tiles into difference variables.
+    """
+    variables = list(data.variables) + list(new_data.variables)
+
+    full = {}
+    for var in variables:
+        if var in data:
+            if var in new_data:
+                full[var] = xr.concat(
+                        (data[var], new_data[var]),
+                        dim=data[var].dims[0]
+                    )
+            else:
+                full[var] = data[var]
+        else:
+            if var in new_data:
+                full[var] = new_data[var]
+
+    return xr.Dataset(full)

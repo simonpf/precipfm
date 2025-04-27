@@ -1244,7 +1244,7 @@ class GEOSInputLoader(MERRAInputData):
         self.n_steps = n_steps
         self.climate = climate
 
-        self.input_times, self.input_files = self.find_geos_files(self.root_dir)
+        self.times, self.input_files = self.find_geos_files(self.root_dir)
 
 
     def find_geos_files(self, root_dir: Path) -> Tuple[np.ndarray, np.ndarray]:
@@ -1277,45 +1277,6 @@ class GEOSInputLoader(MERRAInputData):
         return times, files
 
 
-    def get_forecast_input(self, init_time: np.datetime64) -> Dict[str, torch.Tensor]:
-        """
-        Get forecast input data to perform a continuous forecast.
-        """
-        input_times = [init_time + np.timedelta64(t_i * self.time_step, "h") for t_i in [-1, 0]]
-        for input_time in input_times:
-            if input_time not in self.input_times:
-                raise ValueError(
-                    "Required input data for t=%s not available.",
-                    input_time
-                )
-
-        dynamic_in = []
-        for input_time in input_times:
-            ind = np.searchsorted(self.input_times, input_time)
-            dynamic_in.append(self.load_dynamic_data(self.input_files[ind]))
-
-        static_time = input_times[-1]
-        static_in = self.load_static_data(static_time)
-
-        pad = partial(nn.functional.pad, pad=((0, 0, 0, -1)))
-        dynamic_in = pad(torch.stack(dynamic_in, 0))[None].repeat(self.n_steps, 1, 1, 1, 1)
-        static_in = pad(static_in)[None].repeat(self.n_steps, 1, 1, 1)
-        input_time = self.input_time * torch.ones(self.n_steps)
-        lead_time = self.time_step * torch.arange(1, self.n_steps + 1).to(dtype=torch.float32)
-
-        if self.climate:
-            output_times = [init_time + step * np.timedelta64(self.time_step, "h") for step in range(1, self.n_steps + 1)]
-            climate = [torch.tensor(load_climatology(self.root_dir, time)) for time in output_times]
-            climate = pad(torch.stack(climate))
-
-        x = {
-            "x": dynamic_in,
-            "static": static_in,
-            "lead_time": lead_time,
-            "input_time": input_time,
-            "climate": climate
-        }
-        return x
 
 
 

@@ -7,7 +7,9 @@ GPM constellation.
 """
 from calendar import monthrange
 import click
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from datetime import datetime, timedelta
+from filelock import FileLock
 import logging
 from pathlib import Path
 import re
@@ -29,21 +31,24 @@ from pansat.products.satellite.gpm import (
     l1c_xcal2016v_noaa18_mhs_v07a,
     l1c_xcal2019v_metopc_mhs_v07a,
     l1c_xcal2016v_metopb_mhs_v07a,
-    l1c_xcal2016c_gpm_gmi_v07a,
+    l1c_r_xcal2016c_gpm_gmi_v07a,
+    l1c_r_xcal2016c_gpm_gmi_v07b,
     l1c_xcal2016v_gcomw1_amsr2_v07a
 )
 from pyresample.geometry import AreaDefinition
-from rich.progress import track
+from rich.progress import Progress
 from tqdm import tqdm
 import xarray as xr
 
 from ..grids import MERRA
 from .utils import (
+    encode_polarization,
     calculate_angles,
     get_output_path,
     round_time,
-    update_tile_list,
-    track_stats
+    track_stats,
+    split_tiles,
+    combine_tiles
 )
 
 
@@ -76,7 +81,7 @@ SENSORS = {
         ("metop_c", 60e3, [l1c_xcal2019v_metopc_mhs_v07a]),
     ],
     "gmi": [
-        ("gpm", 20e3, [l1c_xcal2016c_gpm_gmi_v07a]),
+        ("gpm", 20e3, [l1c_r_xcal2016c_gpm_gmi_v07a, l1c_r_xcal2016c_gpm_gmi_v07b]),
     ],
     "amsr2": [
         ("gcomw1", 20e3, [l1c_xcal2016v_gcomw1_amsr2_v07a]),
@@ -191,25 +196,17 @@ def extract_observations(
                 obs[obs > 400] = np.nan
 
                 # Calculate relative time in seconds
-                rel_time = (swath_data_r.scan_time.data - time).astype("timedelta64[s]").astype("float32")
+                rel_time = (swath_data_r.scan_time.data - time).astype("timedelta64[m]").astype("float32")
 
                 output = xr.Dataset({
                     "observations": (("y", "x"), obs),
-                    "observation_relative_time": (("y", "x"), rel_time),
-                    "observation_zenith_angle": (("y", "x"), zenith.copy()),
-                    "observation_azimuth_angle": (("y", "x"), azimuth.copy()),
+                    "time_offset": (("y", "x"), rel_time),
                 })
-                output["observations"].data[~mask] = np.nan
-                output["observation_relative_time"].data[~mask] = np.datetime64("NAT")
-                output["observation_zenith_angle"].data[~mask] = np.nan
-                output["observation_azimuth_angle"].data[~mask] = np.nan
 
-                output.attrs = {
-                    "frequency": freq,
-                    "wavelength": speed_of_light / (freq * 1e9) * 1e6,
-                    "offset": offset,
-                    "polarization": pol,
-                }
+                output["observations"].data[~mask] = np.nan
+                #output["observation_relative_time"].data[~mask] = np.datetime64("NAT")
+                #output["observation_zenith_angle"].data[~mask] = np.nan
+                #output["observation_azimuth_angle"].data[~mask] = np.nan
 
                 uint16_max = 2 ** 16 - 1
                 encoding = {
@@ -227,9 +224,7 @@ def extract_observations(
                 valid = np.isfinite(output.observations.data)
                 if valid.sum() == 0:
                     continue
-                track_stats(base_path, obs_name, output.observations.data)
-
-                output.attrs["obs_name"] = obs_name
+                obs_id = track_stats(base_path, obs_name, output.observations.data)
 
                 output = output.coarsen({"x": 32, "y": 30})
                 output = output.construct({
@@ -241,21 +236,52 @@ def extract_observations(
                 valid_tiles = np.isfinite(output.observations).mean(("lon_tile", "lat_tile")) > 0.25
                 output = output[{"tiles": valid_tiles}].reset_index("tiles")
 
-                obs_name = f"{platform_name}_{sensor_name}_{freq:.02f}_{offset:.02}_{pol.lower()}"
-                output_file = obs_name + ".nc"
-                output_path = base_path / get_output_path(time) / output_file
-                output_path.parent.mkdir(parents=True, exist_ok=True)
+                tot_tiles = output.tiles.size
+                ones = np.ones(tot_tiles)
+                height = output.lat_tile.size
+                width = output.lon_tile.size
 
-                if output_path.exists():
-                    data = xr.load_dataset(output_path)
-                    old_tiles = set(zip(data.tiles_meridional.data, data.tiles_zonal.data))
-                    new_tiles = list(zip(output.tiles_meridional.data, output.tiles_zonal.data))
-                    tile_mask = np.array([coords not in old_tiles for coords in new_tiles])
-                    new_data = xr.concat((data, output[{"tiles": tile_mask}]), "tiles")
-                    data.to_netcdf(output_path, encoding=encoding)
-                else:
-                    output.to_netcdf(output_path, encoding=encoding)
+                frequency = freq
+                wavelength = speed_of_light / (freq * 1e9) * 1e6,
+                polarization = encode_polarization(pol)
+                output["wavelength"] = (("tiles",), wavelength * ones)
+                output["frequency"] = (("tiles",), frequency * ones)
+                output["offset"] = (("tiles",), offset * ones)
+                output["polarization"] = (("tiles",), polarization * ones.astype(np.int8))
+                output["obs_id"] = (("tiles",), obs_id * ones.astype(np.int8))
 
+                new_data = split_tiles(output)
+
+                filename = start_time.astype("datetime64[s]").item().strftime("obs_%Y%m%d%H%M%S.nc")
+                output_path = base_path / get_output_path(start_time) / filename
+
+                lock = FileLock(output_path.with_suffix(".lock"))
+                with lock:
+
+                    if output_path.exists():
+                        existing = xr.load_dataset(output_path)
+                        new_data = combine_tiles(existing, new_data)
+
+                    new_data = split_tiles(output)
+                    if output_path.exists():
+                        existing = xr.load_dataset(output_path)
+                        new_data = combine_tiles(existing, new_data)
+
+                    fill_value = 2 ** 15 - 1
+                    encoding = {}
+                    for var in new_data:
+                        if var.startswith("observations") or var.startswith("time_offset"):
+                            encoding[var] = {
+                                "zlib": True,
+                                "dtype": "int16",
+                                "scale_factor": 0.1,
+                                "_FillValue": fill_value
+                            }
+
+                    if not output_path.parent.exists():
+                        output_path.parent.mkdir(parents=True)
+
+                    new_data.to_netcdf(output_path, encoding=encoding)
 
         swath_ind += 1
 
@@ -297,7 +323,8 @@ def extract_observations_day(
 @click.argument('year', type=int)
 @click.argument('month', type=int)
 @click.argument('output_path', type=click.Path())
-def process_sensor_data(sensor_name, year, month, output_path):
+@click.option("--n_processes", help="The number of process to use for the data extraction.", default=1)
+def process_sensor_data(sensor_name, year, month, output_path, n_processes:int = 1):
     """
     Process sensor data for a given sensor, year, and month, and save the result to the specified output path.
 
@@ -311,5 +338,30 @@ def process_sensor_data(sensor_name, year, month, output_path):
         return
 
     _, n_days = monthrange(year, month)
-    for day in track(range(n_days)):
-        extract_observations_day(sensor_name, year, month, day + 1, output_path)
+    days = list(range(1, n_days + 1))
+
+    if n_processes > 1:
+        LOGGER.info(f"Using {n_processes} processes for downloading data.")
+        tasks = [(sensor_name, year, month, d, output_path) for d in days]
+
+        with ProcessPoolExecutor(max_workers=n_processes) as executor, Progress() as progress:
+            task_id = progress.add_task("Extracting data:", total=len(tasks))
+            future_to_task = {executor.submit(extract_observations_day, *task): task for task in tasks}
+            for future in as_completed(future_to_task):
+                task = future_to_task[future]
+                try:
+                    future.result()
+                except Exception as e:
+                    LOGGER.exception(f"Task {task} failed with error: {e}")
+                finally:
+                    progress.update(task_id, advance=1)
+    else:
+        with Progress() as progress:
+            task_id = progress.add_task("Extracting data:", total=len(days))
+            for d in days:
+                try:
+                    extract_observations_day(sensor_name, year, month, d, output_path)
+                except Exception as e:
+                    LOGGER.exception(f"Error processing day {d}: {e}")
+                finally:
+                    progress.update(task_id, advance=1)

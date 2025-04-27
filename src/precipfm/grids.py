@@ -17,5 +17,5 @@ MERRA = AreaDefinition(
     },
     width=576,
     height=360,
-    area_extent=[-180.3125, -90, 179.6978, 90]
+    area_extent=[-180.3125, 90, 179.6978, -90]
 )

@@ -5,13 +5,14 @@ precipfm.data.patmosx
 This module provides functionality to extract observation data from the PATMOS-x dataset.
 """
 from calendar import monthrange
-from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from datetime import datetime
 import logging
 from pathlib import Path
 from typing import Tuple
 
 import click
+from filelock import FileLock
 from scipy.constants import speed_of_light
 import numpy as np
 from pansat.file_record import FileRecord
@@ -26,7 +27,9 @@ import xarray as xr
 from ..grids import MERRA
 from .utils import (
     get_output_path,
-    track_stats
+    track_stats,
+    split_tiles,
+    combine_tiles
 )
 
 
@@ -117,41 +120,22 @@ def extract_observations(
                 obs_t[~mask] = np.nan
 
                 # Calculate relative time in seconds
-                rel_time = (obs_time.data - time).astype("timedelta64[s]").astype("float32")
+                rel_time = (obs_time.data - time).astype("timedelta64[m]").astype("float32")
 
                 output = xr.Dataset({
                     "observations": (("y", "x"), obs_t),
-                    "observation_relative_time": (("y", "x"), rel_time),
+                    "time_offset": (("y", "x"), rel_time),
                 })
 
                 wl_1, wl_2 = obs_var.split("_")[1:3]
                 wavelength = float(wl_1 + "." + wl_2[:-3])
 
-
-                output.attrs = {
-                    "frequency": speed_of_light / (wavelength / 1e6) / 1e9,
-                    "wavelength": wavelength,
-                    "offset": 0.0,
-                    "polarization": "None",
-                }
-
-                uint16_max = 2 ** 16 - 1
-                encoding = {
-                    "observations": {"dtype": "uint16", "scale_factor": 0.01, "_FillValue": uint16_max, "zlib": True},
-                    "observation_relative_time": {"dtype": "uint16", "_FillValue": uint16_max, "zlib": True},
-                }
-
                 n_rows, n_cols = output.observations.data.shape
                 tile_dims = (n_rows // n_tiles[0], n_cols // n_tiles[1])
-
                 obs_name = f"patmosx_{platform}_{obs_var}"
-
                 valid = np.isfinite(output.observations.data)
                 if valid.sum() == 0:
                     continue
-                track_stats(base_path, obs_name, output.observations.data)
-
-                output.attrs["obs_name"] = obs_name
 
                 output = output.coarsen({"y": tile_dims[0], "x": tile_dims[1]})
                 output = output.construct({
@@ -163,19 +147,52 @@ def extract_observations(
                 valid_tiles = np.isfinite(output.observations).mean(("lon_tile", "lat_tile")) > 0.25
                 output = output[{"tiles": valid_tiles}].reset_index("tiles")
 
-                output_file = obs_name + ".nc"
-                output_path = base_path / get_output_path(time) / output_file
-                output_path.parent.mkdir(parents=True, exist_ok=True)
+                tot_tiles = output.tiles.size
+                ones = np.ones(tot_tiles)
+                height = output.lat_tile.size
+                width = output.lon_tile.size
 
+                obs_id = track_stats(base_path, obs_name, output.observations.data)
+                frequency = speed_of_light / (wavelength / 1e6) / 1e9,
+                offset = 0.0
+                polarization = 0
+                output["wavelength"] = (("tiles",), wavelength * ones)
+                output["frequency"] = (("tiles",), frequency * ones)
+                output["offset"] = (("tiles",), offset * ones)
+                output["polarization"] = (("tiles",), polarization * ones.astype(np.int8))
+                output["obs_id"] = (("tiles",), obs_id * ones.astype(np.int8))
+
+                new_data = split_tiles(output)
+                filename = start_time.strftime("obs_%Y%m%d%H%M%S.nc")
+                output_path = base_path / get_output_path(start_time) / filename
                 if output_path.exists():
-                    data = xr.load_dataset(output_path)
-                    old_tiles = set(zip(data.tiles_meridional.data, data.tiles_zonal.data))
-                    new_tiles = list(zip(output.tiles_meridional.data, output.tiles_zonal.data))
-                    tile_mask = np.array([coords not in old_tiles for coords in new_tiles])
-                    new_data = xr.concat((data, output[{"tiles": tile_mask}]), "tiles")
-                    data.to_netcdf(output_path, encoding=encoding)
-                else:
-                    output.to_netcdf(output_path, encoding=encoding)
+                    existing = xr.load_dataset(output_path)
+                    new_data = combine_tiles(existing, new_data)
+
+                lock = FileLock(output_path.with_suffix(".lock"))
+                with lock:
+
+                    new_data = split_tiles(output)
+                    if output_path.exists():
+                        existing = xr.load_dataset(output_path)
+                        new_data = combine_tiles(existing, new_data)
+
+                    fill_value = 2 ** 15 - 1
+                    encoding = {}
+                    for var in new_data:
+                        if var.startswith("observations") or var.startswith("time_offset"):
+                            encoding[var] = {
+                                "zlib": True,
+                                "dtype": "int16",
+                                "scale_factor": 0.1,
+                                "_FillValue": fill_value
+                            }
+
+                    if not output_path.parent.exists():
+                        output_path.parent.mkdir(parents=True)
+
+                    lock = FileLock(output_path.with_suffix(".lock"))
+                    new_data.to_netcdf(output_path, encoding=encoding)
 
 
 
