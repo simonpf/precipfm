@@ -890,7 +890,7 @@ class PrecipForecastDataset(MERRAInputData):
                 torch.tensor(load_climatology(self.root_dir, time)) for time in output_times
             ]
 
-            input_time = self.input_time
+            input_time = -self.input_time
             lead_time = self.time_step
 
             # Remove one row along lat dimension.
