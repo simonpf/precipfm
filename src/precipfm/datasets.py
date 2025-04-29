@@ -1103,6 +1103,22 @@ class ObservationLoader(Dataset):
             return files
         return [path for path in files if self.file_regexp.match(path.name)]
 
+    @cached_property
+    def stats_data(self):
+        stats_file = self.observation_path / "stats.nc"
+        lock_file = stats_file.with_suffix(".lock")
+        with lock_file:
+            stats = xr.load_dataset(stats_file)
+        return stats
+
+    @cache
+    def get_minmax(self, obs_id: int):
+        var_name = self.stats_data.attrs["variables"][obs_id]
+        min_val = self.stats_data[f"{var_name}_min"].data
+        max_val = self.stats_data[f"{var_name}_max"].data
+        return min_val, max_val
+
+
     def get_minmax(self, name: str) -> Tuple[float, float]:
         with xr.open_dataset(self.observation_path / "stats.nc") as stats:
             if f"{name}_min" not in stats:
@@ -1129,7 +1145,6 @@ class ObservationLoader(Dataset):
 
         layer_ind = np.zeros(self.n_tiles, dtype=np.int64)
 
-        print("OBS :: ", path)
         data = xr.load_dataset(path)
 
         for row_ind in range(self.n_tiles[0]):
@@ -1142,7 +1157,16 @@ class ObservationLoader(Dataset):
                 obs = torch.tensor(data[obs_name].data)
                 inds = np.random.permutation(obs.shape[0])
                 tiles = min(obs.shape[0], self.observation_layers)
-                observations[row_ind, col_ind, :tiles, 0] = obs[inds[:tiles]]
+
+                obs_ids = f"obs_id_{row_ind:02}_{col_ind:02}"
+                obs_ids = data[obs_id].data[inds[:tiles]]
+                minmax = np.array([self.get_minmax(obs_id) for obs_id in obs_ids])
+
+                obs = obs[inds[:tiles]]
+                invalid = np.isnan(obs)
+                obs_n = -1.0 + 2.0 * (obs - minmax[:, 0]) / (minmax[:, 1] - minmax[:, 0])
+                obs_n[invalid] = -1.5
+                observations[row_ind, col_ind, :tiles, 0]  = obs_n
 
                 freq = np.log10(data[f"frequency_{row_ind:02}_{col_ind:02}"].data[inds[:tiles]])
                 freq = -1.0 + 2.0 * (freq - np.log10(self.freq_max)) / (np.log10(self.freq_max) - np.log10(self.freq_min))
