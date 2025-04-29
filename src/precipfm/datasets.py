@@ -748,7 +748,8 @@ class PrecipForecastDataset(MERRAInputData):
             self,
             root_dir: Union[Path, str],
             time_step: int = 3,
-            n_steps: int = 8
+            n_steps: int = 8,
+            sampling_rate: float = 1.0
     ):
         """
         Args:
@@ -759,6 +760,7 @@ class PrecipForecastDataset(MERRAInputData):
         self.input_time = -time_step
         self.time_step = time_step
         self.n_steps = n_steps
+        self.sampling_rate = sampling_rate
 
         self.root_dir = Path(root_dir)
         self.input_times, self.input_files = self.find_merra_files(self.root_dir)
@@ -767,6 +769,14 @@ class PrecipForecastDataset(MERRAInputData):
         self._pos_sig = None
         self.time_step = time_step
         self.input_indices, self.output_indices = self.calculate_valid_samples()
+        self.rng = np.random.default_rng(seed=42)
+
+    def worker_init_fn(self, w_id: int) -> None:
+        """
+        Seeds the dataset loader's random number generator.
+        """
+        seed = int.from_bytes(os.urandom(4), "big") + w_id
+        self.rng = np.random.default_rng(seed)
 
 
     def find_merra_files(self, root_dir: Path) -> Tuple[np.ndarray, np.ndarray]:
@@ -850,23 +860,35 @@ class PrecipForecastDataset(MERRAInputData):
         return np.array(input_indices), np.array(output_indices)
 
     def __len__(self):
-        return len(self.input_indices)
+        return trunc(len(self.input_indices) * self.sampling_rate)
 
     def __getitem__(self, ind: int) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Load and return a single data point from the dataset.
         """
+        lower = trunc(ind / self.sampling_rate)
+        upper = min(trunc((ind + 1) / self.sampling_rate), len(self.input_indices) - 1)
+        if lower < upper:
+            ind = self.rng.integers(lower, upper)
+        else:
+            ind = lower
+
         try:
             input_files = [self.input_files[ind] for ind in self.input_indices[ind]]
             input_times = [self.input_times[ind] for ind in self.input_indices[ind]]
             dynamic_in = [self.load_dynamic_data(path) for path in input_files]
 
+            output_times = [
+                self.output_times[out_ind] for out_ind in self.output_indices[ind]
+            ]
             static_times = [
-                self.output_times[out_ind] - np.timedelta64(self.time_step, "h") for out_ind in self.output_indices[ind]
+                out_time - np.timedelta64(self.time_step, "h") for out_time in output_times
             ]
             static_in = [self.load_static_data(static_time) for static_time in static_times]
 
-            climate = [torch.tensor(load_climatology(self.root_dir, time)) for time in self.output_times]
+            climate = [
+                torch.tensor(load_climatology(self.root_dir, time)) for time in output_times
+            ]
 
             input_time = self.input_time
             lead_time = self.time_step
