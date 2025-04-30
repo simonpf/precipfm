@@ -13,6 +13,7 @@ import re
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Union
 
+from filelock import FileLock
 import numpy as np
 from pansat.time import to_datetime64, to_datetime
 from PrithviWxC.dataloaders.merra2 import (
@@ -1079,7 +1080,8 @@ class DirectPrecipForecastDataset(PrecipForecastDataset):
 
 class ObservationLoader(Dataset):
     """
-    PyTorch dataset for loading global satellite observations.
+    PyTorch dataset for loading satellite observations as input for
+    PrithviWxC precipitation forecasts.
     """
     def __init__(
             self,
@@ -1091,6 +1093,10 @@ class ObservationLoader(Dataset):
         """
         Args:
             observation_path: Path containing the observations.
+            observation_layers: The number of observation layers to load.
+            n_tiles: A tuple specifying containing the number of meridional
+                and zonal tiles, respectively.
+            tile_size: The size of the observation tiles.
         """
         self.observation_path = Path(observation_path)
         self.observation_layers = observation_layers
@@ -1128,28 +1134,28 @@ class ObservationLoader(Dataset):
     @cached_property
     def stats_data(self):
         stats_file = self.observation_path / "stats.nc"
-        lock_file = stats_file.with_suffix(".lock")
+        lock_file = FileLock(stats_file.with_suffix(".lock"))
         with lock_file:
             stats = xr.load_dataset(stats_file)
         return stats
 
+    @cached_property
+    def obs_vars(self):
+        return self.stats_data.attrs["variables"].split(",")
+
     @cache
     def get_minmax(self, obs_id: int):
-        var_name = self.stats_data.attrs["variables"][obs_id]
+        var_name = self.obs_vars[min(obs_id, len(self.obs_vars) - 1)]
         min_val = self.stats_data[f"{var_name}_min"].data
         max_val = self.stats_data[f"{var_name}_max"].data
         return min_val, max_val
 
 
-    def get_minmax(self, name: str) -> Tuple[float, float]:
-        with xr.open_dataset(self.observation_path / "stats.nc") as stats:
-            if f"{name}_min" not in stats:
-                return np.nan, np.nan
-            min_val = stats[f"{name}_min"].data
-            max_val = stats[f"{name}_max"].data
-        return min_val, max_val
-
-    def load_observations(self, time: np.datetime64, offset: Optional[int] = None):
+    def load_observations(
+            self,
+            time: np.datetime64,
+            offset: Optional[int] = None
+    ):
         """
         Load observations for a given time.
         """
@@ -1176,19 +1182,20 @@ class ObservationLoader(Dataset):
                 if obs_name not in data:
                     continue
 
-                obs = torch.tensor(data[obs_name].data)
+                obs = data[obs_name].data
                 inds = np.random.permutation(obs.shape[0])
                 tiles = min(obs.shape[0], self.observation_layers)
 
                 obs_ids = f"obs_id_{row_ind:02}_{col_ind:02}"
-                obs_ids = data[obs_id].data[inds[:tiles]]
+                obs_ids = data[obs_ids].data[inds[:tiles]]
                 minmax = np.array([self.get_minmax(obs_id) for obs_id in obs_ids])
+                minmax = minmax[..., None, None]
 
                 obs = obs[inds[:tiles]]
                 invalid = np.isnan(obs)
                 obs_n = -1.0 + 2.0 * (obs - minmax[:, 0]) / (minmax[:, 1] - minmax[:, 0])
                 obs_n[invalid] = -1.5
-                observations[row_ind, col_ind, :tiles, 0]  = obs_n
+                observations[row_ind, col_ind, :tiles, 0]  = torch.tensor(obs_n)
 
                 freq = np.log10(data[f"frequency_{row_ind:02}_{col_ind:02}"].data[inds[:tiles]])
                 freq = -1.0 + 2.0 * (freq - np.log10(self.freq_max)) / (np.log10(self.freq_max) - np.log10(self.freq_min))
@@ -1199,6 +1206,8 @@ class ObservationLoader(Dataset):
                 )
 
                 time_offset = data[f"time_offset_{row_ind:02}_{col_ind:02}"].data[inds[:tiles]] / 180.0
+                if offset is not None:
+                    time_offset = time_offset + offset
 
                 meta_data[row_ind, col_ind, :tiles, 0] = torch.tensor(freq)[..., None, None]
                 meta_data[row_ind, col_ind, :tiles, 1] = torch.tensor(offs)[..., None, None]
@@ -1210,8 +1219,8 @@ class ObservationLoader(Dataset):
 
 class DirectPrecipForecastWithObsDataset(DirectPrecipForecastDataset):
     """
-    A PyTorch Dataset for loading precipitation forecast training data for direct forecasts without
-    unrolling.
+    A PyTorch Dataset for loading precipitation forecast training data with global satellite
+    observations.
     """
     def __init__(
             self,
@@ -1248,6 +1257,7 @@ class DirectPrecipForecastWithObsDataset(DirectPrecipForecastDataset):
         obs = []
         meta = []
         for time_ind, time in enumerate(input_times):
+            print("Loading obs :: ", time)
             obs_t, meta_t = self.obs_loader.load_observations(time, offset=len(input_times) - time_ind - 1)
             obs.append(obs_t)
             meta.append(meta_t)
