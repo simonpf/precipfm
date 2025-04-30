@@ -1257,7 +1257,6 @@ class DirectPrecipForecastWithObsDataset(DirectPrecipForecastDataset):
         obs = []
         meta = []
         for time_ind, time in enumerate(input_times):
-            print("Loading obs :: ", time)
             obs_t, meta_t = self.obs_loader.load_observations(time, offset=len(input_times) - time_ind - 1)
             obs.append(obs_t)
             meta.append(meta_t)

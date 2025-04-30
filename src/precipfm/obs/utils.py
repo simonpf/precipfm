@@ -243,7 +243,7 @@ def track_stats(
                 data[variable_name + "_counts"] = obs.size
                 data[variable_name + "_min"] = obs.min()
                 data[variable_name + "_max"] = obs.max()
-                var_ind = all_vars.index(variable_name)
+            var_ind = all_vars.index(variable_name)
 
         data.attrs["variables"] = ",".join(all_vars)
         data.to_netcdf(stats_file)
