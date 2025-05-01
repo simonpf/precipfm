@@ -1182,37 +1182,43 @@ class ObservationLoader(Dataset):
                 if obs_name not in data:
                     continue
 
-                obs = data[obs_name].data
-                inds = np.random.permutation(obs.shape[0])
-                tiles = min(obs.shape[0], self.observation_layers)
+                try:
+                    obs = data[obs_name].data
+                    inds = np.random.permutation(obs.shape[0])
+                    tiles = min(obs.shape[0], self.observation_layers)
 
-                obs_ids = f"obs_id_{row_ind:02}_{col_ind:02}"
-                obs_ids = data[obs_ids].data[inds[:tiles]]
-                minmax = np.array([self.get_minmax(obs_id) for obs_id in obs_ids])
-                minmax = minmax[..., None, None]
+                    obs_ids = f"obs_id_{row_ind:02}_{col_ind:02}"
+                    obs_ids = data[obs_ids].data[inds[:tiles]]
+                    minmax = np.array([self.get_minmax(obs_id) for obs_id in obs_ids])
+                    minmax = minmax[..., None, None]
 
-                obs = obs[inds[:tiles]]
-                invalid = np.isnan(obs)
-                obs_n = -1.0 + 2.0 * (obs - minmax[:, 0]) / (minmax[:, 1] - minmax[:, 0])
-                obs_n[invalid] = -1.5
-                observations[row_ind, col_ind, :tiles, 0]  = torch.tensor(obs_n)
+                    obs = obs[inds[:tiles]]
+                    invalid = np.isnan(obs)
+                    obs_n = -1.0 + 2.0 * (obs - minmax[:, 0]) / (minmax[:, 1] - minmax[:, 0])
+                    obs_n[invalid] = -1.5
+                    observations[row_ind, col_ind, :tiles, 0]  = torch.tensor(obs_n)
 
-                freq = np.log10(data[f"frequency_{row_ind:02}_{col_ind:02}"].data[inds[:tiles]])
-                freq = -1.0 + 2.0 * (freq - np.log10(self.freq_max)) / (np.log10(self.freq_max) - np.log10(self.freq_min))
-                offs = data[f"offset_{row_ind:02}_{col_ind:02}"].data[inds[:tiles]]
-                pol = torch.nn.functional.one_hot(
-                    torch.tensor(data[f"polarization_{row_ind:02}_{col_ind:02}"].data[inds[:tiles]]).to(dtype=torch.int64),
-                    num_classes=5
-                )
+                    freq = np.log10(data[f"frequency_{row_ind:02}_{col_ind:02}"].data[inds[:tiles]])
+                    freq = -1.0 + 2.0 * (freq - np.log10(self.freq_max)) / (np.log10(self.freq_max) - np.log10(self.freq_min))
+                    offs = data[f"offset_{row_ind:02}_{col_ind:02}"].data[inds[:tiles]]
+                    pol = torch.nn.functional.one_hot(
+                        torch.tensor(data[f"polarization_{row_ind:02}_{col_ind:02}"].data[inds[:tiles]]).to(dtype=torch.int64),
+                        num_classes=5
+                    )
 
-                time_offset = data[f"time_offset_{row_ind:02}_{col_ind:02}"].data[inds[:tiles]] / 180.0
-                if offset is not None:
-                    time_offset = time_offset + offset
+                    time_offset = data[f"time_offset_{row_ind:02}_{col_ind:02}"].data[inds[:tiles]] / 180.0
+                    if offset is not None:
+                        time_offset = time_offset + offset
 
-                meta_data[row_ind, col_ind, :tiles, 0] = torch.tensor(freq)[..., None, None]
-                meta_data[row_ind, col_ind, :tiles, 1] = torch.tensor(offs)[..., None, None]
-                meta_data[row_ind, col_ind, :tiles, 2] = torch.tensor(time_offset)
-                meta_data[row_ind, col_ind, :tiles, 3:] = pol[..., None, None]
+                    meta_data[row_ind, col_ind, :tiles, 0] = torch.tensor(freq)[..., None, None]
+                    meta_data[row_ind, col_ind, :tiles, 1] = torch.tensor(offs)[..., None, None]
+                    meta_data[row_ind, col_ind, :tiles, 2] = torch.tensor(time_offset)
+                    meta_data[row_ind, col_ind, :tiles, 3:] = pol[..., None, None]
+                except Exception:
+                    LOGGER.warning(
+                        "Encountered an error when loading observations from file '%s'.",
+                        path
+                    )
 
         return observations, meta_data
 
