@@ -1237,6 +1237,7 @@ class DirectPrecipForecastWithObsDataset(DirectPrecipForecastDataset):
             n_tiles: Tuple[int, int] = (12, 18),
             tile_size: Tuple[int, int] = (30, 32),
             climate: bool = False,
+            sampling_rate: float = 1.0,
     ):
         """
         Args:
@@ -1245,7 +1246,14 @@ class DirectPrecipForecastWithObsDataset(DirectPrecipForecastDataset):
             max_steps: The maximum number of timesteps to forecast precipitation.
         """
         root_dir = Path(root_dir)
-        super().__init__(root_dir=root_dir, time_step=time_step, max_steps=max_steps, climate=climate)
+        super().__init__(
+            root_dir=root_dir,
+            time_step=time_step,
+            max_steps=max_steps,
+            climate=climate,
+            sampling_rate=1.0
+        )
+        self._sampling_rate = sampling_rate
         self.rng = np.random.default_rng(seed=42)
         self.obs_loader = ObservationLoader(
             root_dir / "obs",
@@ -1258,6 +1266,13 @@ class DirectPrecipForecastWithObsDataset(DirectPrecipForecastDataset):
         """
         Load and return a single data point from the dataset.
         """
+        lower = trunc(ind / self._sampling_rate)
+        upper = min(trunc((ind + 1) / self._sampling_rate), len(self.input_indices) - 1)
+        if lower < upper:
+            ind = self.rng.integers(lower, upper)
+        else:
+            ind = lower
+
         x, y = super().__getitem__(ind)
         input_times = [self.input_times[ind] for ind in self.input_indices[ind]]
         obs = []
