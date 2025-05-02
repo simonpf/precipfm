@@ -1175,7 +1175,11 @@ class ObservationLoader(Dataset):
 
         layer_ind = np.zeros(self.n_tiles, dtype=np.int64)
 
-        data = xr.load_dataset(path)
+        try:
+            data = xr.load_dataset(path)
+        except Exception:
+            return observations, meta_data
+
 
         for row_ind in range(self.n_tiles[0]):
             for col_ind in range(self.n_tiles[1]):
@@ -1263,6 +1267,9 @@ class DirectPrecipForecastWithObsDataset(DirectPrecipForecastDataset):
             tile_size=tile_size,
             observation_layers=32
         )
+
+    def __len__(self):
+        return trunc(len(self.input_indices) * self._sampling_rate)
 
     def __getitem__(self, ind: int) -> Tuple[torch.Tensor, torch.Tensor]:
         """
