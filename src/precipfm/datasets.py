@@ -1225,6 +1225,8 @@ class ObservationLoader(Dataset):
                         path
                     )
 
+        observations = torch.nan_to_num(observations, nan=-1.5)
+        meta_data = torch.nan_to_num(meta_data, nan=-1.5)
         return observations, meta_data
 
 
