@@ -187,3 +187,10 @@ def plot_tiles_compressed(dataset: xr.Dataset):
         m = ax.pcolormesh(x, y, obs_t, norm=norm)
 
     plt.colorbar(m)
+
+
+def set_style():
+    """
+    Set the IPWGML matplotlib style.
+    """
+    plt.style.use(Path(__file__).parent / "configs" / "precipfm.mplstyle")
