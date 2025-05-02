@@ -1018,6 +1018,8 @@ class DirectPrecipForecastDataset(PrecipForecastDataset):
             input_times = [self.input_times[ind] for ind in self.input_indices[ind]]
             dynamic_in = [self.load_dynamic_data(path) for path in input_files]
 
+            print("INPT :: ", input_files)
+
             static_time = input_times[-1]
             static_in = self.load_static_data(static_time)
 
@@ -1148,7 +1150,7 @@ class ObservationLoader(Dataset):
         var_name = self.obs_vars[min(obs_id, len(self.obs_vars) - 1)]
         min_val = self.stats_data[f"{var_name}_min"].data
         max_val = self.stats_data[f"{var_name}_max"].data
-        return min_val, max_val
+        return 0, 300
 
 
     def load_observations(
@@ -1278,6 +1280,7 @@ class DirectPrecipForecastWithObsDataset(DirectPrecipForecastDataset):
         obs = []
         meta = []
         for time_ind, time in enumerate(input_times):
+            print("obs :: ", time)
             obs_t, meta_t = self.obs_loader.load_observations(time, offset=len(input_times) - time_ind - 1)
             obs.append(obs_t)
             meta.append(meta_t)
