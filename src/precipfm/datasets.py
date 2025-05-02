@@ -1162,8 +1162,8 @@ class ObservationLoader(Dataset):
         date = to_datetime(time)
         path = self.observation_path / date.strftime("%Y/%m/%d/obs_%Y%m%d%H%M%S.nc")
 
-        observations = torch.nan * torch.zeros(self.n_tiles + (self.observation_layers, 1) + self.tile_size)
-        meta_data = torch.nan * torch.zeros(self.n_tiles + (self.observation_layers, 8) + self.tile_size)
+        observations = -1.5 * torch.zeros(self.n_tiles + (self.observation_layers, 1) + self.tile_size)
+        meta_data = -1.5 * torch.zeros(self.n_tiles + (self.observation_layers, 8) + self.tile_size)
 
         if not path.exists():
             LOGGER.warning(
