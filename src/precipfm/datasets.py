@@ -1205,6 +1205,7 @@ class ObservationLoader(Dataset):
                     freq = np.log10(data[f"frequency_{row_ind:02}_{col_ind:02}"].data[inds[:tiles]])
                     freq = -1.0 + 2.0 * (freq - np.log10(self.freq_max)) / (np.log10(self.freq_max) - np.log10(self.freq_min))
                     offs = data[f"offset_{row_ind:02}_{col_ind:02}"].data[inds[:tiles]]
+                    offs = np.minimum(offs, 10) / 10
                     pol = torch.nn.functional.one_hot(
                         torch.tensor(data[f"polarization_{row_ind:02}_{col_ind:02}"].data[inds[:tiles]]).to(dtype=torch.int64),
                         num_classes=5
