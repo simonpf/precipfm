@@ -1181,8 +1181,8 @@ class ObservationLoader(Dataset):
         date = to_datetime(time)
         path = self.observation_path / date.strftime("%Y/%m/%d/obs_%Y%m%d%H%M%S.nc")
 
-        observations = torch.nan * torch.zeros(self.n_tiles + (self.observation_layers, 1) + self.tile_size)
-        meta_data = torch.nan * torch.zeros(self.n_tiles + (self.observation_layers, 8) + self.tile_size)
+        observations = -1.5 * torch.zeros(self.n_tiles + (self.observation_layers, 1) + self.tile_size)
+        meta_data = -1.5 * torch.zeros(self.n_tiles + (self.observation_layers, 8) + self.tile_size)
 
         if not path.exists():
             LOGGER.warning(
@@ -1224,6 +1224,7 @@ class ObservationLoader(Dataset):
                     freq = np.log10(data[f"frequency_{row_ind:02}_{col_ind:02}"].data[inds[:tiles]])
                     freq = -1.0 + 2.0 * (freq - np.log10(self.freq_max)) / (np.log10(self.freq_max) - np.log10(self.freq_min))
                     offs = data[f"offset_{row_ind:02}_{col_ind:02}"].data[inds[:tiles]]
+                    offs = np.minimum(offs, 10) / 10
                     pol = torch.nn.functional.one_hot(
                         torch.tensor(data[f"polarization_{row_ind:02}_{col_ind:02}"].data[inds[:tiles]]).to(dtype=torch.int64),
                         num_classes=5
@@ -1243,6 +1244,8 @@ class ObservationLoader(Dataset):
                         path
                     )
 
+        observations = torch.nan_to_num(observations, nan=-1.5)
+        meta_data = torch.nan_to_num(meta_data, nan=-1.5)
         return observations, meta_data
 
 
