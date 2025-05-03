@@ -646,17 +646,23 @@ class PrecipDiagnosisDataset(MERRAInputData):
         return times, files
 
 
-    def find_precip_files(self, root_dir) -> np.ndarray:
+    def find_precip_files(self, root_dir, reference_data: str = "IMERG") -> np.ndarray:
         """
         Find precip files for training.
         """
         times = []
         files = []
-        pattern = re.compile(r"imerg_(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})\.nc")
 
-        for path in sorted(list(root_dir.glob("imerg/**/imerg_*.nc"))):
+        if reference_data == "IMERG":
+            pattern = "imerg/**/imerg_*.nc"
+            date_pattern = "imerg_%Y%m%d%H%M%S.nc"
+        else:
+            pattern = "prectot/**/prectot_*.nc"
+            date_pattern = "prectot_%Y%m%d%H%M%S.nc"
+
+        for path in sorted(list(root_dir.glob(pattern))):
             try:
-                date = datetime.strptime(path.name, "imerg_%Y%m%d%H%M%S.nc")
+                date = datetime.strptime(path.name, date_pattern)
                 date64 = to_datetime64(date)
                 files.append(str(path.relative_to(root_dir)))
                 times.append(date64)
@@ -750,7 +756,8 @@ class PrecipForecastDataset(MERRAInputData):
             root_dir: Union[Path, str],
             time_step: int = 3,
             n_steps: int = 8,
-            sampling_rate: float = 1.0
+            sampling_rate: float = 1.0,
+            reference_data: str = "IMERG"
     ):
         """
         Args:
@@ -762,10 +769,11 @@ class PrecipForecastDataset(MERRAInputData):
         self.time_step = time_step
         self.n_steps = n_steps
         self.sampling_rate = sampling_rate
+        self.reference_data = reference_data
 
         self.root_dir = Path(root_dir)
         self.input_times, self.input_files = self.find_merra_files(self.root_dir)
-        self.output_times, self.output_files = self.find_precip_files(self.root_dir)
+        self.output_times, self.output_files = self.find_precip_files(self.root_dir, self.reference_data)
 
         self._pos_sig = None
         self.time_step = time_step
@@ -810,17 +818,23 @@ class PrecipForecastDataset(MERRAInputData):
         return times, files
 
 
-    def find_precip_files(self, root_dir) -> np.ndarray:
+    def find_precip_files(self, root_dir, reference_data: str = "IMERG") -> np.ndarray:
         """
         Find precip files for training.
         """
         times = []
         files = []
-        pattern = re.compile(r"imerg_(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})\.nc")
 
-        for path in sorted(list(root_dir.glob("imerg/**/imerg_*.nc"))):
+        if reference_data == "IMERG":
+            pattern = "imerg/**/imerg_*.nc"
+            date_pattern = "imerg_%Y%m%d%H%M%S.nc"
+        else:
+            pattern = "prectot/**/prectot_*.nc"
+            date_pattern = "prectot_%Y%m%d%H%M%S.nc"
+
+        for path in sorted(list(root_dir.glob(pattern))):
             try:
-                date = datetime.strptime(path.name, "imerg_%Y%m%d%H%M%S.nc")
+                date = datetime.strptime(path.name, date_pattern)
                 date64 = to_datetime64(date)
                 files.append(str(path.relative_to(root_dir)))
                 times.append(date64)
@@ -935,7 +949,8 @@ class DirectPrecipForecastDataset(PrecipForecastDataset):
             max_steps: int = 24,
             climate: bool = True,
             augment: bool = True,
-            sampling_rate: float = 1.0
+            sampling_rate: float = 1.0,
+            reference_data: str = "IMERG"
     ):
         """
         Args:
@@ -951,10 +966,14 @@ class DirectPrecipForecastDataset(PrecipForecastDataset):
         self.climate = climate
         self.augment = augment
         self.sampling_rate = sampling_rate
+        self.reference_data = reference_data
 
         self.root_dir = Path(root_dir)
         self.input_times, self.input_files = self.find_merra_files(self.root_dir)
-        self.output_times, self.output_files = self.find_precip_files(self.root_dir)
+        self.output_times, self.output_files = self.find_precip_files(
+            self.root_dir,
+            reference_data=self.reference_data
+        )
 
         self._pos_sig = None
         self.time_step = time_step
@@ -1017,8 +1036,6 @@ class DirectPrecipForecastDataset(PrecipForecastDataset):
             input_files = [self.input_files[ind] for ind in self.input_indices[ind]]
             input_times = [self.input_times[ind] for ind in self.input_indices[ind]]
             dynamic_in = [self.load_dynamic_data(path) for path in input_files]
-
-            print("INPT :: ", input_files)
 
             static_time = input_times[-1]
             static_in = self.load_static_data(static_time)
@@ -1244,6 +1261,7 @@ class DirectPrecipForecastWithObsDataset(DirectPrecipForecastDataset):
             tile_size: Tuple[int, int] = (30, 32),
             climate: bool = False,
             sampling_rate: float = 1.0,
+            reference_data: str = "IMERG"
     ):
         """
         Args:
@@ -1257,7 +1275,8 @@ class DirectPrecipForecastWithObsDataset(DirectPrecipForecastDataset):
             time_step=time_step,
             max_steps=max_steps,
             climate=climate,
-            sampling_rate=1.0
+            sampling_rate=1.0,
+            reference_data=reference_data
         )
         self._sampling_rate = sampling_rate
         self.rng = np.random.default_rng(seed=42)
@@ -1287,7 +1306,6 @@ class DirectPrecipForecastWithObsDataset(DirectPrecipForecastDataset):
         obs = []
         meta = []
         for time_ind, time in enumerate(input_times):
-            print("obs :: ", time)
             obs_t, meta_t = self.obs_loader.load_observations(time, offset=len(input_times) - time_ind - 1)
             obs.append(obs_t)
             meta.append(meta_t)
