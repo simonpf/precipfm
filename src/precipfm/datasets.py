@@ -130,7 +130,8 @@ class MERRAInputData(Dataset):
             root_dir: Union[Path, str],
             input_times: Optional[List[int]] = None,
             lead_times: Optional[List[int]] = None,
-            climate: bool = True
+            climate: bool = True,
+            observation_layers: Optional[int] = None
     ):
 
         """
@@ -145,6 +146,10 @@ class MERRAInputData(Dataset):
         self.times, self.input_files = self.find_files(self.root_dir)
         self.time_step = lead_times[0]
         self.climate = climate
+        if observation_layers is not None:
+            self.obs_loader = ObservationLoader(self.root_dir / "obs")
+        else:
+            self.obs_loader = None
 
         self._pos_sig = None
         self.input_times = input_times
@@ -395,10 +400,6 @@ class MERRAInputData(Dataset):
         data[n_pos + 1] = np.sin(2 * np.pi * doy / 366)
         data[n_pos + 2] = np.cos(2 * np.pi * hod / 24)
         data[n_pos + 3] = np.sin(2 * np.pi * hod / 24)
-        #data[n_pos + 0] = np.cos(2 * np.pi * hod / 366)
-        #data[n_pos + 1] = np.sin(2 * np.pi * hod / 366)
-        #data[n_pos + 2] = np.cos(2 * np.pi * doy / 24)
-        #data[n_pos + 3] = np.sin(2 * np.pi * doy / 24)
 
         for ind, var in enumerate(STATIC_SURFACE_VARS):
             data[n_pos + 4 + ind] = torch.tensor(static_data[var].data)
@@ -478,6 +479,22 @@ class MERRAInputData(Dataset):
             climate = [torch.tensor(load_climatology(self.root_dir, time)) for time in output_times]
             climate = pad(torch.stack(climate))
             x["climate"] = climate
+
+        if self.obs_loader is not None:
+            obs = []
+            meta = []
+            for time_ind, time in enumerate(input_times):
+                obs_t, meta_t = self.obs_loader.load_observations(time, offset=len(input_times) - time_ind - 1)
+                obs.append(obs_t)
+                meta.append(meta_t)
+            obs = torch.stack(obs, 0), (1, -2)
+            obs_mask = torch.isnan(obs)
+            obs = torch.nan_to_num(obs, nan=-1.5)
+            meta = torch.stack(meta, 0)
+
+            x["obs"] = obs
+            x["obs_mask"] = obs_mask
+            x["obs_meta"] = meta
 
         return x
 
@@ -1312,7 +1329,7 @@ class DirectPrecipForecastWithObsDataset(DirectPrecipForecastDataset):
             obs_t, meta_t = self.obs_loader.load_observations(time, offset=len(input_times) - time_ind - 1)
             obs.append(obs_t)
             meta.append(meta_t)
-        obs = torch.flip(torch.stack(obs, 0), (1, -2))
+        obs = torch.stack(obs, 0)
         obs_mask = torch.isnan(obs)
         obs = torch.nan_to_num(obs, nan=-1.5)
         meta = torch.stack(meta, 0)
@@ -1430,7 +1447,7 @@ class GEOSObservationInputLoader(GEOSInputLoader):
             obs_t, meta_t = self.obs_loader.load_observations(time, offset=len(input_times) - time_ind - 1)
             obs.append(obs_t)
             meta.append(meta_t)
-        obs = torch.flip(torch.stack(obs, 0), (1, -2))
+        obs = torch.stack(obs, 0)
         obs_mask = torch.isnan(obs)
         obs = torch.nan_to_num(obs, nan=-1.5)
         meta = torch.stack(meta, 0)
