@@ -1084,6 +1084,8 @@ class DirectPrecipForecastDataset(PrecipForecastDataset):
 
             with xr.load_dataset(self.root_dir / output_file) as data:
                 LOGGER.debug("Loading precip data from %s.", output_file)
+                if self.reference_data != "IMERG":
+                    data = data[{"lat": slice(0, -1)}]
                 precip = torch.tensor(data.surface_precip.data.astype(np.float32))
 
             coords = x["static"][:2]
