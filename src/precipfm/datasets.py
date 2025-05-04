@@ -487,9 +487,9 @@ class MERRAInputData(Dataset):
                 obs_t, meta_t = self.obs_loader.load_observations(time, offset=len(input_times) - time_ind - 1)
                 obs.append(obs_t)
                 meta.append(meta_t)
-            obs = torch.stack(obs, 0), (1, -2)
-            obs_mask = torch.isnan(obs)
-            obs = torch.nan_to_num(obs, nan=-1.5)
+            obs = torch.stack(obs, 0)
+            obs_mask = obs < -2.9
+            obs = torch.nan_to_num(obs, nan=-3.0)
             meta = torch.stack(meta, 0)
 
             x["obs"] = obs
@@ -1198,8 +1198,8 @@ class ObservationLoader(Dataset):
         date = to_datetime(time)
         path = self.observation_path / date.strftime("%Y/%m/%d/obs_%Y%m%d%H%M%S.nc")
 
-        observations = -1.5 * torch.zeros(self.n_tiles + (self.observation_layers, 1) + self.tile_size)
-        meta_data = -1.5 * torch.zeros(self.n_tiles + (self.observation_layers, 8) + self.tile_size)
+        observations = -3.0 * torch.ones(self.n_tiles + (self.observation_layers, 1) + self.tile_size)
+        meta_data = -3.0 * torch.ones(self.n_tiles + (self.observation_layers, 8) + self.tile_size)
 
         if not path.exists():
             LOGGER.warning(
@@ -1261,8 +1261,8 @@ class ObservationLoader(Dataset):
                         path
                     )
 
-        observations = torch.nan_to_num(observations, nan=-1.5)
-        meta_data = torch.nan_to_num(meta_data, nan=-1.5)
+        observations = torch.nan_to_num(observations, nan=-3.0)
+        meta_data = torch.nan_to_num(meta_data, nan=-3.0)
         return observations, meta_data
 
 
@@ -1330,8 +1330,8 @@ class DirectPrecipForecastWithObsDataset(DirectPrecipForecastDataset):
             obs.append(obs_t)
             meta.append(meta_t)
         obs = torch.stack(obs, 0)
-        obs_mask = torch.isnan(obs)
-        obs = torch.nan_to_num(obs, nan=-1.5)
+        obs_mask = obs < -2.9
+        obs = torch.nan_to_num(obs, nan=-3.0)
         meta = torch.stack(meta, 0)
 
         x["obs"] = obs
@@ -1448,8 +1448,8 @@ class GEOSObservationInputLoader(GEOSInputLoader):
             obs.append(obs_t)
             meta.append(meta_t)
         obs = torch.stack(obs, 0)
-        obs_mask = torch.isnan(obs)
-        obs = torch.nan_to_num(obs, nan=-1.5)
+        obs_mask = obs < -2.9
+        obs = torch.nan_to_num(obs, nan=-3.0)
         meta = torch.stack(meta, 0)
 
         x["obs"] = obs[None].repeat_interleave(self.n_steps, 0)
