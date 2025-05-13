@@ -1188,6 +1188,10 @@ class ObservationLoader(Dataset):
         max_val = self.stats_data[f"{var_name}_max"].data
         return 0, 300
 
+    def has_obs(self, time: np.datetime64):
+        date = to_datetime(time)
+        path = self.observation_path / date.strftime("%Y/%m/%d/obs_%Y%m%d%H%M%S.nc")
+        return path.exists()
 
     def load_observations(
             self,
@@ -1292,6 +1296,12 @@ class DirectPrecipForecastWithObsDataset(DirectPrecipForecastDataset):
             max_steps: The maximum number of timesteps to forecast precipitation.
         """
         root_dir = Path(root_dir)
+        self.obs_loader = ObservationLoader(
+            root_dir / "obs",
+            n_tiles=n_tiles,
+            tile_size=tile_size,
+            observation_layers=32
+        )
         super().__init__(
             root_dir=root_dir,
             time_step=time_step,
@@ -1302,15 +1312,41 @@ class DirectPrecipForecastWithObsDataset(DirectPrecipForecastDataset):
         )
         self._sampling_rate = sampling_rate
         self.rng = np.random.default_rng(seed=42)
-        self.obs_loader = ObservationLoader(
-            root_dir / "obs",
-            n_tiles=n_tiles,
-            tile_size=tile_size,
-            observation_layers=32
-        )
+
+
+    def calculate_valid_samples(self) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        A tuple of index arrays containing the indices of input- and output files for all training data
+        samples satifying the requested input and lead time combination.
+
+        Return: A tuple '(input_indices, output_indices)' with `input_indices` of shape
+            '(n_samples, n_input_times)' containing the indices of all the input files for each data
+            samples. Similarly, 'output_indices' is a numpy.ndarray of shape '(n_samples, n_lead_times)'
+            containing the corresponding file indices to load for the output data.
+        """
+        input_indices = []
+        output_indices = []
+        for ind in range(self.input_times.size):
+            sample_time = self.input_times[ind]
+            input_times = [sample_time + np.timedelta64(t_i * self.time_step, "h") for t_i in [-1, 0]]
+            output_times = [
+                sample_time + np.timedelta64(t_i * self.time_step, "h") for t_i in np.arange(1, self.max_steps + 1)
+            ]
+            output_times = [t_o for t_o in output_times if t_o in self.output_times]
+            valid = all([t_i in self.input_times and self.obs_loader.has_obs(t_i) for t_i in input_times])
+            if valid and len(output_times) > 0:
+                input_indices.append([ind - self.time_step // 3, ind])
+                output_inds = []
+                for output_time in output_times:
+                    output_ind = np.searchsorted(self.output_times, output_time)
+                    output_inds.append(output_ind)
+                output_indices.append(output_inds + [-1] * (self.max_steps - len(output_inds)))
+        return np.array(input_indices), np.array(output_indices)
+
 
     def __len__(self):
         return trunc(len(self.input_indices) * self._sampling_rate)
+
 
     def __getitem__(self, ind: int) -> Tuple[torch.Tensor, torch.Tensor]:
         """
