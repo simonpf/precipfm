@@ -1116,6 +1116,54 @@ class DirectPrecipForecastDataset(PrecipForecastDataset):
             return self[new_ind]
 
 
+class DirectPrecipRegionalForecastDataset(DirectPrecipForecastDataset):
+    """
+    A PyTorch Dataset for loading precipitation forecast training data for direct forecasts without
+    unrolling.
+    """
+    def __init__(
+            self,
+            root_dir: Union[Path, str],
+            time_step: int = 3,
+            max_steps: int = 24,
+            climate: bool = True,
+            augment: bool = True,
+            sampling_rate: float = 1.0,
+            reference_data: str = "IMERG",
+    ):
+        """
+        Args:
+            root_dir (str): Root directory containing year/month/day folders.
+            time_step: The forecast time step.
+            max_steps: The maximum number of timesteps to forecast precipitation.
+            augment: Whether or not to augment the training data using random meridioanl flipping and
+                 zonal rolls.
+        """
+        super().__init__(
+            root_dir=root_dir,
+            time_step=time_step,
+            max_steps=max_steps,
+            climate=climate,
+            augment=augment,
+            sampling_rate=sampling_rate,
+            reference_data=reference_data
+        )
+    def __getitem__(self, ind: int) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        Load and return a single data point from the dataset.
+        """
+        x, precip = super()[ind]
+        height, width = x["x"].shape[-2]
+        row_start = self.rng.integers(0, height - 30)
+        col_start = self.rng.integers(0, width - 32)
+        x["x_regional"] = x["x"][..., row_start:row_start + 30, col_start: col_start + 32]
+        x["static_regional"] = x["static_regional"][..., row_start:row_start + 30, col_start: col_start + 32]
+        if "climate" in x:
+            x["climate_regional"] = x["climate_regional"][..., row_start:row_start + 30, col_start: col_start + 32]
+        precip = precip[..., row_start:row_start + 30, col_start:col_start + 32]
+        return x, precip
+
+
 class ObservationLoader(Dataset):
     """
     PyTorch dataset for loading satellite observations as input for
