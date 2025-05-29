@@ -23,6 +23,7 @@ from PrithviWxC.dataloaders.merra2 import (
 import torch
 from torch import nn
 from torch.utils.data import Dataset
+from tqdm import tqdm
 import numpy as np
 import xarray as xr
 import yaml
@@ -93,6 +94,9 @@ def load_climatology(root_dir: Path, time: np.datetime64) -> np.ndarray:
     Args:
          root_dir: The root directory containing the foundation model data.
          time: A timestamp defining the time for which to load the input data.
+
+    Return:
+         A numpy array containing the climatology data for the given time.
     """
     date = time.astype("datetime64[s]").item()
     year = date.year
@@ -352,7 +356,7 @@ class MERRAInputData(Dataset):
 
     def load_static_data(self, time: np.datetime64) -> torch.Tensor:
         """
-        Load all dynamic data from a given input file and return the data.
+        Load static input data for a given time.
 
         Args:
             path: A path object pointing to the file to load.
@@ -455,10 +459,10 @@ class MERRAInputData(Dataset):
 
         dynamic_in = []
         for input_time in input_times:
-            ind = np.searchsorted(self.times, input_times[-1])
+            ind = np.searchsorted(self.times, input_time)
             dynamic_in.append(self.load_dynamic_data(self.input_files[ind]))
 
-        static_time = self.times[-1]
+        static_time = input_times[-1]
         static_in = self.load_static_data(static_time)
 
         pad = partial(nn.functional.pad, pad=((0, 0, 0, -1)))
@@ -492,9 +496,9 @@ class MERRAInputData(Dataset):
             obs = torch.nan_to_num(obs, nan=-3.0)
             meta = torch.stack(meta, 0)
 
-            x["obs"] = obs
-            x["obs_mask"] = obs_mask
-            x["obs_meta"] = meta
+            x["obs"] = obs[None].repeat_interleave(n_steps, 0)
+            x["obs_mask"] = obs_mask[None].repeat_interleave(n_steps, 0)
+            x["obs_meta"] = meta[None].repeat_interleave(n_steps, 0)
 
         return x
 
@@ -965,7 +969,7 @@ class DirectPrecipForecastDataset(PrecipForecastDataset):
             time_step: int = 3,
             max_steps: int = 24,
             climate: bool = True,
-            augment: bool = True,
+            augment: bool = False,
             sampling_rate: float = 1.0,
             reference_data: str = "IMERG"
     ):
@@ -1094,12 +1098,14 @@ class DirectPrecipForecastDataset(PrecipForecastDataset):
                 roll = self.rng.integers(0, 576 // 32) * 32
                 for var in ["x", "static", "climate"]:
                     x[var] = x[var].roll(roll, dims=-1)
+                precip = precip.roll(roll, dims=-1)
 
 
                 flip = self.rng.random() > 0.5
                 if flip:
                     for var in ["x", "static", "climate"]:
                         x[var] = x[var].flip(-2)
+                    precip = precip.flip(-2)
 
                 x["static"][:2] = coords
 
@@ -1194,7 +1200,6 @@ class ObservationLoader(Dataset):
         self.freq_max = 30e3
         self.file_regexp = None
 
-
     def worker_init_fn(self, w_id: int) -> None:
         """
         Seeds the dataset loader's random number generator.
@@ -1203,27 +1208,103 @@ class ObservationLoader(Dataset):
         seed = int.from_bytes(os.urandom(4), "big") + w_id
         self.rng = np.random.default_rng(seed)
 
-
-    def find_files(self, path: Path) -> List[Path]:
+    @cached_property
+    def start_time(self):
         """
-        Find all input files in YYY/mm/dd/HH folder.
-
-        Args:
-             path: The path in which to look for files.
+        The first time for which observations are available.
         """
+        year_folders = sorted([path for path in self.observation_path.iterdir() if path.is_dir()])
+        month_folders = sorted([path for path in year_folders[0].iterdir() if path.is_dir()])
+        day_folders = sorted([path for path in month_folders[0].iterdir() if path.is_dir()])
+        year = int(year_folders[0].name)
+        month = int(month_folders[0].name)
+        day = int(day_folders[0].name)
+        return np.datetime64(f"{year}-{month:02}-{day:02}")
 
-        files = np.random.permutation(sorted(list(path.glob("*.nc"))))
-        if self.file_regexp is None:
-            return files
-        return [path for path in files if self.file_regexp.match(path.name)]
+    @cached_property
+    def end_time(self):
+        """
+        The last time for which observations are available.
+        """
+        year_folders = sorted([path for path in self.observation_path.iterdir() if path.is_dir()])
+        month_folders = sorted([path for path in year_folders[-1].iterdir() if path.is_dir()])
+        day_folders = sorted([path for path in month_folders[-1].iterdir() if path.is_dir()])
+        year = int(year_folders[-1].name)
+        month = int(month_folders[-1].name)
+        day = int(day_folders[-1].name)
+        return np.datetime64(f"{year}-{month:02}-{day:02}")
 
     @cached_property
     def stats_data(self):
+        """
+        The observation bulk statistics from the stats.nc file in the top-level directory.
+        """
         stats_file = self.observation_path / "stats.nc"
         lock_file = FileLock(stats_file.with_suffix(".lock"))
         with lock_file:
             stats = xr.load_dataset(stats_file)
         return stats
+
+    def get_observation_mask(self) -> xr.Dataset:
+        """
+        Calculate an xarray.Dataset indicating the availability of different observations.
+        """
+        stats = self.stats_data
+        all_vars = stats.attrs["variables"].split(",")
+        n_vars = len(all_vars)
+
+        start_time = self.start_time
+        end_time = self.end_time
+
+        times = np.arange(start_time, end_time + np.timedelta64(3, "h"), np.timedelta64(3, "h"))
+        obs_times = []
+        obs_tiles = []
+        obs_bins = np.arange(n_vars + 1) - 0.5
+
+        for time in tqdm(times):
+            date = to_datetime(time)
+            path = self.observation_path / date.strftime("%Y/%m/%d/obs_%Y%m%d%H%M%S.nc")
+            if path.exists():
+                try:
+                    with xr.open_dataset(path) as obs_data:
+                        obs_times.append(time)
+                        obs_tiles.append(np.zeros((obs_bins.size - 1,) + self.n_tiles))
+
+                        for meridional_index in range(self.n_tiles[0]):
+                            for zonal_index in range(self.n_tiles[1]):
+                                tilename = f"obs_id_{meridional_index:02}_{zonal_index:02}"
+                                if tilename in obs_data:
+                                    obs_ids = obs_data[tilename].data
+                                    obs_tiles[-1][:, meridional_index, zonal_index] += np.histogram(obs_ids, bins=obs_bins)[0]
+                except Exception:
+                    LOGGER.exception(
+                        "Encountered an error when observation file %s.",
+                        path
+                    )
+
+        platforms = []
+        sensors = []
+        for var in all_vars:
+            platform_sensor = var.split("_")[0]
+            parts = platform_sensor.split(".")
+            platform = parts[0]
+            sensor = ""
+            if len(parts) > 1:
+                sensor = parts[1]
+            platforms.append(platform)
+            sensors.append(sensor)
+
+        times = np.array(obs_times)
+        mask = np.stack(obs_tiles)
+        obs_mask = xr.Dataset({
+            "time": (("time",), times),
+            "observations": (("observations",), all_vars),
+            "platforms" : (("observations"), platforms),
+            "sensors" : (("observations"), sensors),
+            "mask": (("time", "observations", "lat_tiles", "lon_tiles"), mask)
+        })
+        return obs_mask
+
 
     @cached_property
     def obs_vars(self):
@@ -1356,7 +1437,8 @@ class DirectPrecipForecastWithObsDataset(DirectPrecipForecastDataset):
             max_steps=max_steps,
             climate=climate,
             sampling_rate=1.0,
-            reference_data=reference_data
+            reference_data=reference_data,
+            augment=False
         )
         self._sampling_rate = sampling_rate
         self.rng = np.random.default_rng(seed=42)
@@ -1381,7 +1463,7 @@ class DirectPrecipForecastWithObsDataset(DirectPrecipForecastDataset):
                 sample_time + np.timedelta64(t_i * self.time_step, "h") for t_i in np.arange(1, self.max_steps + 1)
             ]
             output_times = [t_o for t_o in output_times if t_o in self.output_times]
-            valid = all([t_i in self.input_times and self.obs_loader.has_obs(t_i) for t_i in input_times])
+            valid = all([t_i in self.input_times for t_i in input_times])
             if valid and len(output_times) > 0:
                 input_indices.append([ind - self.time_step // 3, ind])
                 output_inds = []
@@ -1416,7 +1498,7 @@ class DirectPrecipForecastWithObsDataset(DirectPrecipForecastDataset):
             obs.append(obs_t)
             meta.append(meta_t)
         obs = torch.stack(obs, 0)
-        obs_mask = obs < -2.9
+        obs_mask = torch.zeros_like(obs) #obs < -2.9
         obs = torch.nan_to_num(obs, nan=-3.0)
         meta = torch.stack(meta, 0)
 
@@ -1521,11 +1603,11 @@ class GEOSObservationInputLoader(GEOSInputLoader):
         )
 
 
-    def get_forecast_input(self, init_time: np.datetime64) -> Dict[str, torch.Tensor]:
+    def get_forecast_input(self, init_time: np.datetime64, n_steps: int) -> Dict[str, torch.Tensor]:
         """
         Get forecast input data to perform a continuous forecast.
         """
-        x = super().get_forecast_input(init_time)
+        x = super().get_forecast_input(init_time, n_steps=n_steps)
         input_times = [init_time + np.timedelta64(t_i * self.time_step, "h") for t_i in [-1, 0]]
         obs = []
         meta = []
@@ -1534,12 +1616,12 @@ class GEOSObservationInputLoader(GEOSInputLoader):
             obs.append(obs_t)
             meta.append(meta_t)
         obs = torch.stack(obs, 0)
-        obs_mask = obs < -2.9
+        obs_mask = torch.zeros_like(obs) #obs < -2.9
         obs = torch.nan_to_num(obs, nan=-3.0)
         meta = torch.stack(meta, 0)
 
-        x["obs"] = obs[None].repeat_interleave(self.n_steps, 0)
-        x["obs_mask"] = obs_mask[None].repeat_interleave(self.n_steps, 0)
-        x["obs_meta"] = meta[None].repeat_interleave(self.n_steps, 0)
+        x["obs"] = obs[None].repeat_interleave(n_steps, 0)
+        x["obs_mask"] = obs_mask[None].repeat_interleave(n_steps, 0)
+        x["obs_meta"] = meta[None].repeat_interleave(n_steps, 0)
 
         return x
